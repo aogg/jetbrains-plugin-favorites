@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.3</version>
+    <version>1.0.4</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,12 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.4 - 阶段四：快速访问
+    - 实现 BookmarkPopup 快速访问弹出窗口
+    - 实现 ShowBookmarksPopupAction 显示收藏弹出窗口动作
+    - 实现 JumpToMnemonicBookmarkAction 跳转到助记符收藏动作（36个快捷键）
+    - 支持键盘导航和搜索功能
+    
     1.0.3 - 阶段三：工具窗口
     - 实现 BookmarksToolWindow 工具窗口
     - 实现 BookmarksTree 自定义Tree组件
@@ -74,6 +80,122 @@
 
         <action id="Favorites.ToggleBookmarksToolWindow" class="com.aogg.favorites.action.ToggleBookmarksToolWindowAction" text="显示/隐藏收藏工具窗口">
             <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 2"/>
+        </action>
+
+        <action id="Favorites.ShowBookmarksPopup" class="com.aogg.favorites.action.ShowBookmarksPopupAction" text="显示收藏列表">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift B"/>
+        </action>
+
+        <!-- 助记符跳转动作 (0-9) -->
+        <action id="Favorites.JumpToMnemonic.0" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [0]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 0"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.1" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [1]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 1"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.2" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [2]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 2"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.3" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [3]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 3"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.4" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [4]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 4"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.5" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [5]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 5"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.6" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [6]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 6"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.7" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [7]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 7"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.8" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [8]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 8"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.9" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [9]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 9"/>
+        </action>
+
+        <!-- 助记符跳转动作 (A-Z) -->
+        <action id="Favorites.JumpToMnemonic.A" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [A]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt A"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.B" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [B]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt B"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.C" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [C]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt C"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.D" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [D]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt D"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.E" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [E]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt E"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.F" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [F]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.G" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [G]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt G"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.H" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [H]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt H"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.I" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [I]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt I"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.J" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [J]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt J"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.K" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [K]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt K"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.L" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [L]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt L"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.M" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [M]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt M"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.N" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [N]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt N"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.O" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [O]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt O"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.P" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [P]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt P"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.Q" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [Q]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt Q"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.R" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [R]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt R"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.S" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [S]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt S"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.T" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [T]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt T"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.U" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [U]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt U"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.V" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [V]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt V"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.W" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [W]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt W"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.X" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [X]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt X"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.Y" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [Y]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt Y"/>
+        </action>
+        <action id="Favorites.JumpToMnemonic.Z" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [Z]">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt Z"/>
         </action>
     </actions>
 </idea-plugin>
