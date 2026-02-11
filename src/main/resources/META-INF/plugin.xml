@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.10</version>
+    <version>1.0.11</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,12 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.11 - 阶段八：测试与文档
+    - 新增 Bookmark 与 BookmarkManager 的单元测试，覆盖核心业务逻辑与路径/助记符处理
+    - 配置 JUnit 5 与 Mockito 测试依赖，支持命令行与 IDE 中运行测试
+    - 补充 README 使用文档与快捷键说明，记录与 PhpStorm 原生收藏的区别与兼容性
+    - 对插件快捷键进行检查，全部使用 Ctrl+Alt 前缀，避免与 F11 / Ctrl+F11 等原生快捷键冲突
+
     1.0.10 - 小优化
     - 清理编译期 warning（不影响功能）
 

@@ -27,7 +27,8 @@ class BookmarkManager(private val project: Project) {
         }
     }
 
-    private val storageHelper = BookmarkStorageHelper.getInstance(project)
+    // 持久化助手，延迟初始化，便于测试环境注入假实现
+    private var storageHelper: BookmarkStorageHelper? = null
 
     @Volatile
     private var loaded = false
@@ -355,7 +356,8 @@ class BookmarkManager(private val project: Project) {
      * 从持久化存储加载收藏
      */
     private fun loadFromStorage() {
-        val (anonymousList, mnemonicMap) = storageHelper.loadBookmarks()
+        val helper = getStorageHelper()
+        val (anonymousList, mnemonicMap) = helper.loadBookmarks()
 
         // 清空现有数据
         clearAll()
@@ -381,7 +383,7 @@ class BookmarkManager(private val project: Project) {
         val anonymousList = anonymousBookmarks.toList()
         val mnemonicMap = mnemonicMap.mapValues { bookmarks[it.value]!! }
             .filterKeys { it in '0'..'9' || it in 'A'..'Z' }
-        storageHelper.saveBookmarks(anonymousList, mnemonicMap)
+        getStorageHelper().saveBookmarks(anonymousList, mnemonicMap)
     }
 
     private fun indexBookmark(bookmark: Bookmark) {
@@ -434,10 +436,30 @@ class BookmarkManager(private val project: Project) {
         indexBookmark(newBookmark)
     }
 
-    private fun removeBookmarkInternal(bookmarkId: String): Boolean {
+        private fun removeBookmarkInternal(bookmarkId: String): Boolean {
         val bookmark = bookmarks.remove(bookmarkId) ?: return false
         bookmark.mnemonic?.let { mnemonicMap.remove(it) }
         unindexBookmark(bookmark)
         return true
+    }
+
+    /**
+     * 获取持久化助手
+     */
+    private fun getStorageHelper(): BookmarkStorageHelper {
+        val current = storageHelper
+        if (current != null) {
+            return current
+        }
+        val created = BookmarkStorageHelper.getInstance(project)
+        storageHelper = created
+        return created
+    }
+
+    /**
+     * 仅用于测试：注入自定义的持久化助手，避免依赖真实 IDE 服务
+     */
+    internal fun setStorageHelperForTest(helper: BookmarkStorageHelper) {
+        this.storageHelper = helper
     }
 }
