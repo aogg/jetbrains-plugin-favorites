@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.5</version>
+    <version>1.0.8</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,11 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.8 - 阶段六：编辑器标签集成
+    - 实现编辑器标签页右键菜单集成
+    - 实现标签页收藏功能
+    - 支持从标签页右键菜单添加匿名收藏和助记符收藏
+    
     1.0.5 - 阶段五：项目窗口集成
     - 实现项目窗口右键菜单集成
     - 实现文件/文件夹收藏功能
@@ -79,6 +84,15 @@
 
         <action id="Favorites.AddMnemonicBookmarkProject" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
             <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmarkProject"/>
+        </action>
+
+        <!-- 编辑器标签页右键菜单 -->
+        <action id="Favorites.AddAnonymousBookmarkTab" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+        </action>
+
+        <action id="Favorites.AddMnemonicBookmarkTab" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmarkTab"/>
         </action>
 
     </extensions>

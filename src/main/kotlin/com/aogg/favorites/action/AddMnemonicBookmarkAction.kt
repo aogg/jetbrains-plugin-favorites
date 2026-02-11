@@ -39,6 +39,13 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
             return
         }
 
+        // 尝试从标签页右键菜单获取文件（EditorTabPopupMenu）
+        val virtualFile = e.getData(CommonDataKeys.VIRTUAL_FILE)
+        if (virtualFile != null) {
+            handleFileContext(project, bookmarkManager, virtualFile, editor)
+            return
+        }
+
         // 尝试从当前打开的文件获取
         val fileEditorManager = FileEditorManager.getInstance(project)
         val selectedFiles = fileEditorManager.selectedFiles
