@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.8</version>
+    <version>1.0.10</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,14 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.10 - 小优化
+    - 清理编译期 warning（不影响功能）
+
+    1.0.9 - 阶段七：监听器和优化
+    - 新增项目级监听器：处理文件/文件夹删除、重命名、移动时的收藏同步与清理
+    - 新增编辑器监听器：自动清理无效行收藏（行号超出范围）并刷新显示
+    - 性能优化：收藏管理器只加载一次持久化数据；gutter 查询使用行收藏索引避免全量扫描
+
     1.0.8 - 阶段六：编辑器标签集成
     - 实现编辑器标签页右键菜单集成
     - 实现标签页收藏功能

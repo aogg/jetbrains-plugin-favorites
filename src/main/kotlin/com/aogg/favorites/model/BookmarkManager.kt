@@ -21,13 +21,17 @@ class BookmarkManager(private val project: Project) {
         @JvmStatic
         fun getInstance(project: Project): BookmarkManager {
             val manager = project.service<BookmarkManager>()
-            // 初始化时加载持久化数据
-            manager.loadFromStorage()
+            // 初始化时加载持久化数据（只加载一次，避免频繁I/O与全量重建索引）
+            manager.ensureLoaded()
             return manager
         }
     }
 
     private val storageHelper = BookmarkStorageHelper.getInstance(project)
+
+    @Volatile
+    private var loaded = false
+    private val loadLock = Any()
 
     // 所有收藏列表（按ID索引）
     private val bookmarks: MutableMap<String, Bookmark> = ConcurrentHashMap()
@@ -44,6 +48,18 @@ class BookmarkManager(private val project: Project) {
     // 文件夹收藏列表（文件夹路径 -> 收藏ID列表）
     private val folderBookmarks: MutableMap<String, MutableList<String>> = ConcurrentHashMap()
 
+    // 行收藏索引（文件路径 -> 行号 -> 收藏ID列表），用于提升 gutter 查询性能
+    private val lineBookmarks: MutableMap<String, MutableMap<Int, MutableList<String>>> = ConcurrentHashMap()
+
+    private fun ensureLoaded() {
+        if (loaded) return
+        synchronized(loadLock) {
+            if (loaded) return
+            loadFromStorage()
+            loaded = true
+        }
+    }
+
     /**
      * 添加收藏
      *
@@ -51,6 +67,7 @@ class BookmarkManager(private val project: Project) {
      * @return 是否添加成功（如果助记符已存在则返回false）
      */
     fun addBookmark(bookmark: Bookmark): Boolean {
+        ensureLoaded()
         // 检查助记符冲突
         if (bookmark.mnemonic != null) {
             if (mnemonicMap.containsKey(bookmark.mnemonic)) {
@@ -63,15 +80,7 @@ class BookmarkManager(private val project: Project) {
         bookmarks[bookmark.id] = bookmark
 
         // 根据类型添加到对应列表
-        when {
-            bookmark.isAnonymous() -> anonymousBookmarks.add(bookmark)
-            bookmark.isFileBookmark() -> {
-                fileBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
-            }
-            bookmark.isFolderBookmark() -> {
-                folderBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
-            }
-        }
+        indexBookmark(bookmark)
 
         // 保存到持久化存储
         saveToStorage()
@@ -86,22 +95,13 @@ class BookmarkManager(private val project: Project) {
      * @return 是否删除成功
      */
     fun removeBookmark(bookmarkId: String): Boolean {
+        ensureLoaded()
         val bookmark = bookmarks.remove(bookmarkId) ?: return false
 
         // 从助记符映射中移除
         bookmark.mnemonic?.let { mnemonicMap.remove(it) }
 
-        // 从匿名收藏列表中移除
-        if (bookmark.isAnonymous()) {
-            anonymousBookmarks.remove(bookmark)
-        }
-
-        // 从文件/文件夹收藏列表中移除
-        if (bookmark.isFileBookmark()) {
-            fileBookmarks[bookmark.filePath]?.remove(bookmarkId)
-        } else if (bookmark.isFolderBookmark()) {
-            folderBookmarks[bookmark.filePath]?.remove(bookmarkId)
-        }
+        unindexBookmark(bookmark)
 
         // 保存到持久化存储
         saveToStorage()
@@ -116,6 +116,7 @@ class BookmarkManager(private val project: Project) {
      * @return 收藏项，如果不存在返回null
      */
     fun getBookmark(bookmarkId: String): Bookmark? {
+        ensureLoaded()
         return bookmarks[bookmarkId]
     }
 
@@ -126,6 +127,7 @@ class BookmarkManager(private val project: Project) {
      * @return 收藏项，如果不存在返回null
      */
     fun getBookmarkByMnemonic(mnemonic: Char): Bookmark? {
+        ensureLoaded()
         val bookmarkId = mnemonicMap[mnemonic] ?: return null
         return bookmarks[bookmarkId]
     }
@@ -136,6 +138,7 @@ class BookmarkManager(private val project: Project) {
      * @return 所有收藏的列表
      */
     fun getAllBookmarks(): List<Bookmark> {
+        ensureLoaded()
         return bookmarks.values.toList()
     }
 
@@ -145,6 +148,7 @@ class BookmarkManager(private val project: Project) {
      * @return 匿名收藏列表
      */
     fun getAnonymousBookmarks(): List<Bookmark> {
+        ensureLoaded()
         return anonymousBookmarks.toList()
     }
 
@@ -154,6 +158,7 @@ class BookmarkManager(private val project: Project) {
      * @return 助记符收藏列表
      */
     fun getMnemonicBookmarks(): List<Bookmark> {
+        ensureLoaded()
         return bookmarks.values.filter { it.isMnemonic() }
     }
 
@@ -164,6 +169,7 @@ class BookmarkManager(private val project: Project) {
      * @return 该文件的收藏列表
      */
     fun getBookmarksByFile(filePath: String): List<Bookmark> {
+        ensureLoaded()
         val bookmarkIds = fileBookmarks[filePath] ?: return emptyList()
         return bookmarkIds.mapNotNull { bookmarks[it] }
     }
@@ -175,8 +181,18 @@ class BookmarkManager(private val project: Project) {
      * @return 该文件夹的收藏列表
      */
     fun getBookmarksByFolder(folderPath: String): List<Bookmark> {
+        ensureLoaded()
         val bookmarkIds = folderBookmarks[folderPath] ?: return emptyList()
         return bookmarkIds.mapNotNull { bookmarks[it] }
+    }
+
+    /**
+     * 获取某个文件某一行的收藏（用于 gutter 查询，避免全量扫描）
+     */
+    fun getLineBookmarks(filePath: String, lineNumber: Int): List<Bookmark> {
+        ensureLoaded()
+        val ids = lineBookmarks[filePath]?.get(lineNumber) ?: return emptyList()
+        return ids.mapNotNull { bookmarks[it] }
     }
 
     /**
@@ -186,6 +202,7 @@ class BookmarkManager(private val project: Project) {
      * @return 是否可用
      */
     fun isMnemonicAvailable(mnemonic: Char): Boolean {
+        ensureLoaded()
         return !mnemonicMap.containsKey(mnemonic)
     }
 
@@ -195,6 +212,7 @@ class BookmarkManager(private val project: Project) {
      * @return 已使用的助记符集合
      */
     fun getUsedMnemonics(): Set<Char> {
+        ensureLoaded()
         return mnemonicMap.keys.toSet()
     }
 
@@ -204,6 +222,7 @@ class BookmarkManager(private val project: Project) {
      * @return 可用的助记符列表（0-9, A-Z）
      */
     fun getAvailableMnemonics(): List<Char> {
+        ensureLoaded()
         val allMnemonics = (('0'..'9') + ('A'..'Z')).toSet()
         val usedMnemonics = getUsedMnemonics()
         return (allMnemonics - usedMnemonics).sorted()
@@ -217,6 +236,7 @@ class BookmarkManager(private val project: Project) {
      * @return 是否更新成功
      */
     fun updateBookmarkDescription(bookmarkId: String, description: String?): Boolean {
+        ensureLoaded()
         val bookmark = bookmarks[bookmarkId] ?: return false
         val updatedBookmark = bookmark.copy(description = description)
         bookmarks[bookmarkId] = updatedBookmark
@@ -236,6 +256,75 @@ class BookmarkManager(private val project: Project) {
     }
 
     /**
+     * 删除指定路径的收藏
+     *
+     * @param path 相对路径
+     * @param includeChildren 是否包含子路径（用于文件夹删除/移出项目）
+     * @return 删除数量
+     */
+    fun removeBookmarksByPath(path: String, includeChildren: Boolean): Int {
+        ensureLoaded()
+        val toRemove = bookmarks.values.filter { bm ->
+            bm.filePath == path || (includeChildren && bm.filePath.startsWith("$path/"))
+        }.map { it.id }
+
+        if (toRemove.isEmpty()) return 0
+
+        toRemove.forEach { removeBookmarkInternal(it) }
+        saveToStorage()
+        return toRemove.size
+    }
+
+    /**
+     * 更新收藏路径（用于文件/文件夹重命名、移动）
+     *
+     * @param oldPath 旧相对路径
+     * @param newPath 新相对路径
+     * @param includeChildren 是否包含子路径（用于文件夹）
+     * @return 更新数量
+     */
+    fun updateBookmarksPath(oldPath: String, newPath: String, includeChildren: Boolean): Int {
+        ensureLoaded()
+        val candidates = bookmarks.values.filter { bm ->
+            bm.filePath == oldPath || (includeChildren && bm.filePath.startsWith("$oldPath/"))
+        }
+        if (candidates.isEmpty()) return 0
+
+        for (bm in candidates) {
+            val updatedPath = if (bm.filePath == oldPath) {
+                newPath
+            } else {
+                // includeChildren 分支：保持子路径后缀不变
+                newPath + bm.filePath.removePrefix(oldPath)
+            }
+            val updated = bm.copy(filePath = updatedPath)
+            replaceBookmarkInternal(bm, updated)
+        }
+
+        saveToStorage()
+        return candidates.size
+    }
+
+    /**
+     * 清理某文件的无效行收藏（行号超出范围）
+     *
+     * @param filePath 相对文件路径
+     * @param lineCount 文件总行数
+     * @return 删除数量
+     */
+    fun cleanupInvalidLineBookmarks(filePath: String, lineCount: Int): Int {
+        ensureLoaded()
+        if (lineCount <= 0) return 0
+        val toRemove = bookmarks.values.filter { bm ->
+            bm.isLineBookmark() && bm.filePath == filePath && (bm.lineNumber < 0 || bm.lineNumber >= lineCount)
+        }.map { it.id }
+        if (toRemove.isEmpty()) return 0
+        toRemove.forEach { removeBookmarkInternal(it) }
+        saveToStorage()
+        return toRemove.size
+    }
+
+    /**
      * 清空所有收藏
      */
     fun clearAll() {
@@ -244,6 +333,7 @@ class BookmarkManager(private val project: Project) {
         mnemonicMap.clear()
         fileBookmarks.clear()
         folderBookmarks.clear()
+        lineBookmarks.clear()
     }
 
     /**
@@ -273,23 +363,14 @@ class BookmarkManager(private val project: Project) {
         // 加载匿名收藏
         anonymousList.forEach { bookmark ->
             bookmarks[bookmark.id] = bookmark
-            anonymousBookmarks.add(bookmark)
-            if (bookmark.isFileBookmark()) {
-                fileBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
-            } else if (bookmark.isFolderBookmark()) {
-                folderBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
-            }
+            indexBookmark(bookmark)
         }
 
         // 加载助记符收藏
         mnemonicMap.forEach { (mnemonic, bookmark) ->
             bookmarks[bookmark.id] = bookmark
             this.mnemonicMap[mnemonic] = bookmark.id
-            if (bookmark.isFileBookmark()) {
-                fileBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
-            } else if (bookmark.isFolderBookmark()) {
-                folderBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
-            }
+            indexBookmark(bookmark)
         }
     }
 
@@ -301,5 +382,62 @@ class BookmarkManager(private val project: Project) {
         val mnemonicMap = mnemonicMap.mapValues { bookmarks[it.value]!! }
             .filterKeys { it in '0'..'9' || it in 'A'..'Z' }
         storageHelper.saveBookmarks(anonymousList, mnemonicMap)
+    }
+
+    private fun indexBookmark(bookmark: Bookmark) {
+        if (bookmark.isAnonymous()) {
+            anonymousBookmarks.add(bookmark)
+        }
+
+        when {
+            bookmark.isFileBookmark() -> {
+                fileBookmarks.getOrPut(bookmark.filePath) { Collections.synchronizedList(mutableListOf()) }.add(bookmark.id)
+            }
+            bookmark.isFolderBookmark() -> {
+                folderBookmarks.getOrPut(bookmark.filePath) { Collections.synchronizedList(mutableListOf()) }.add(bookmark.id)
+            }
+            bookmark.isLineBookmark() -> {
+                val lineMap = lineBookmarks.getOrPut(bookmark.filePath) { ConcurrentHashMap() }
+                lineMap.getOrPut(bookmark.lineNumber) { Collections.synchronizedList(mutableListOf()) }.add(bookmark.id)
+            }
+        }
+    }
+
+    private fun unindexBookmark(bookmark: Bookmark) {
+        if (bookmark.isAnonymous()) {
+            anonymousBookmarks.removeIf { it.id == bookmark.id }
+        }
+
+        if (bookmark.isFileBookmark()) {
+            fileBookmarks[bookmark.filePath]?.removeIf { it == bookmark.id }
+        } else if (bookmark.isFolderBookmark()) {
+            folderBookmarks[bookmark.filePath]?.removeIf { it == bookmark.id }
+        } else if (bookmark.isLineBookmark()) {
+            lineBookmarks[bookmark.filePath]?.get(bookmark.lineNumber)?.removeIf { it == bookmark.id }
+        }
+    }
+
+    private fun replaceBookmarkInternal(oldBookmark: Bookmark, newBookmark: Bookmark) {
+        // 主表替换
+        bookmarks[newBookmark.id] = newBookmark
+
+        // 更新匿名列表里的对象引用（使用id匹配，避免 data class equals 误判）
+        if (oldBookmark.isAnonymous()) {
+            val idx = anonymousBookmarks.indexOfFirst { it.id == oldBookmark.id }
+            if (idx >= 0) {
+                anonymousBookmarks[idx] = newBookmark
+            }
+        }
+
+        // 更新索引
+        unindexBookmark(oldBookmark)
+        indexBookmark(newBookmark)
+    }
+
+    private fun removeBookmarkInternal(bookmarkId: String): Boolean {
+        val bookmark = bookmarks.remove(bookmarkId) ?: return false
+        bookmark.mnemonic?.let { mnemonicMap.remove(it) }
+        unindexBookmark(bookmark)
+        return true
     }
 }

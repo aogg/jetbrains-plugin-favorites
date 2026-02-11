@@ -5,12 +5,10 @@ import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
 import com.intellij.codeInsight.daemon.LineMarkerInfo
 import com.intellij.codeInsight.daemon.LineMarkerProvider
-import com.intellij.icons.AllIcons
 import com.intellij.openapi.editor.markup.GutterIconRenderer
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiWhiteSpace
-import com.intellij.psi.util.PsiUtilCore
 
 /**
  * 编辑器行号区域图标显示助手
@@ -41,8 +39,8 @@ class BookmarkGutterHelper : LineMarkerProvider {
         val filePath = getRelativeFilePath(project, virtualFile.path) ?: return null
 
         // 查找该行的收藏
-        val bookmarks = bookmarkManager.getAllBookmarks()
-            .filter { it.type == BookmarkType.LINE && it.filePath == filePath && it.lineNumber == lineNumber }
+        val bookmarks = bookmarkManager.getLineBookmarks(filePath, lineNumber)
+            .filter { it.type == BookmarkType.LINE }
 
         if (bookmarks.isEmpty()) {
             return null
@@ -94,6 +92,7 @@ class BookmarkGutterHelper : LineMarkerProvider {
     /**
      * 导航到收藏位置
      */
+    @Suppress("UNUSED_PARAMETER")
     private fun navigateToBookmark(project: Project, bookmark: Bookmark) {
         // 导航逻辑将在后续实现
         // 这里先留空，后续在动作类中实现
