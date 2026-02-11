@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,12 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.5 - 阶段五：项目窗口集成
+    - 实现项目窗口右键菜单集成
+    - 实现文件/文件夹收藏功能
+    - 实现批量添加收藏功能
+    - 优化助记符收藏的批量选择提示
+    
     1.0.4 - 阶段四：快速访问
     - 实现 BookmarkPopup 快速访问弹出窗口
     - 实现 ShowBookmarksPopupAction 显示收藏弹出窗口动作
@@ -64,6 +70,15 @@
         <action id="Favorites.AddMnemonicBookmark" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
             <add-to-group group-id="EditorPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmark"/>
             <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
+        </action>
+
+        <!-- 项目窗口右键菜单 -->
+        <action id="Favorites.AddAnonymousBookmarkProject" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+        </action>
+
+        <action id="Favorites.AddMnemonicBookmarkProject" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmarkProject"/>
         </action>
 
     </extensions>

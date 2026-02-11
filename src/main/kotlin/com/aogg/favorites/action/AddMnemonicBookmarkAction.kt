@@ -129,7 +129,16 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         bookmarkManager: BookmarkManager,
         virtualFiles: Array<VirtualFile>
     ) {
-        // 对于多个文件，只处理第一个
+        // 助记符收藏每个标识符只能使用一次，所以只处理第一个文件/文件夹
+        // 如果选择了多个，提示用户
+        if (virtualFiles.size > 1) {
+            Messages.showInfoMessage(
+                project,
+                "助记符收藏每个标识符只能使用一次，已为第一个选中的项目添加收藏。如需为多个项目添加收藏，请分别操作。",
+                "批量选择提示"
+            )
+        }
+
         val virtualFile = virtualFiles[0]
         val filePath = getRelativeFilePath(project, virtualFile.path) ?: return
 
