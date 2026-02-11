@@ -206,7 +206,7 @@ class BookmarksTreeCellRenderer : javax.swing.tree.DefaultTreeCellRenderer() {
         // 设置默认图标
         leafIcon = AllIcons.Gutter.Bookmark
         closedIcon = AllIcons.Nodes.Folder
-        openIcon = AllIcons.Nodes.FolderOpen
+        openIcon = AllIcons.Nodes.Folder
     }
     
     override fun getTreeCellRendererComponent(
@@ -227,7 +227,7 @@ class BookmarksTreeCellRenderer : javax.swing.tree.DefaultTreeCellRenderer() {
             // 根节点或分组节点
             userObject is String -> {
                 text = userObject
-                icon = if (expanded) AllIcons.Nodes.FolderOpen else AllIcons.Nodes.Folder
+                icon = AllIcons.Nodes.Folder
             }
             // 收藏节点
             userObject is Bookmark -> {

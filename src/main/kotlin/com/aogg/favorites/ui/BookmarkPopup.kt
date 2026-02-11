@@ -56,18 +56,21 @@ class BookmarkPopup(
         val popup = PopupFactoryImpl.getInstance().createListPopupBuilder(list)
             .setTitle("收藏列表")
             .setItemChoosenCallback {
-                val selectedBookmark = list.selectedValue as? Bookmark ?: return@createListPopupBuilder
+                val selectedBookmark = list.selectedValue as? Bookmark ?: return@setItemChoosenCallback
                 navigateToBookmark(selectedBookmark)
             }
-            .setFilteringEnabled(true)
             .createPopup()
         
         // 显示弹出窗口
-        val component = editor?.contentComponent ?: FileEditorManager.getInstance(project).selectedTextEditor?.contentComponent
-        if (component != null) {
-            popup.showInBestPositionFor(component)
+        if (editor != null) {
+            popup.showInBestPositionFor(editor)
         } else {
-            popup.showCenteredInCurrentWindow(project)
+            val selectedEditor = FileEditorManager.getInstance(project).selectedTextEditor
+            if (selectedEditor != null) {
+                popup.showInBestPositionFor(selectedEditor)
+            } else {
+                popup.showCenteredInCurrentWindow(project)
+            }
         }
     }
     

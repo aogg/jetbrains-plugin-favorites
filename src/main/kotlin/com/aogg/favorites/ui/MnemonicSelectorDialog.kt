@@ -6,6 +6,7 @@ import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.GridBag
+import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import javax.swing.JComponent
 import javax.swing.JPanel
@@ -38,7 +39,22 @@ class MnemonicSelectorDialog(
     private fun setupUI() {
         // 设置助记符输入框
         mnemonicField.columns = 1
-        mnemonicField.maxLength = 1
+        // 限制输入长度为1
+        (mnemonicField.document as? javax.swing.text.PlainDocument)?.documentFilter = object : javax.swing.text.DocumentFilter() {
+            override fun replace(fb: javax.swing.text.DocumentFilter.FilterBypass?, offset: Int, length: Int, text: String?, attrs: javax.swing.text.AttributeSet?) {
+                if (text != null && (fb?.document?.length ?: 0) - length + text.length > 1) {
+                    return
+                }
+                super.replace(fb, offset, length, text, attrs)
+            }
+            
+            override fun insertString(fb: javax.swing.text.DocumentFilter.FilterBypass?, offset: Int, string: String?, attrs: javax.swing.text.AttributeSet?) {
+                if (string != null && (fb?.document?.length ?: 0) + string.length > 1) {
+                    return
+                }
+                super.insertString(fb, offset, string, attrs)
+            }
+        }
         mnemonicField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
             override fun insertUpdate(e: javax.swing.event.DocumentEvent?) {
                 validateInput()
@@ -92,7 +108,10 @@ class MnemonicSelectorDialog(
                 append(usedMnemonics.sorted().joinToString(", "))
             }
         }
-        panel.add(JBLabel(hintText), gb.nextLine().next().spanX(2).anchor(GridBag.WEST))
+        val hintLabel = JBLabel(hintText)
+        val gbc = gb.nextLine().next().anchor(GridBag.WEST) as GridBagConstraints
+        gbc.gridwidth = GridBagConstraints.REMAINDER
+        panel.add(hintLabel, gbc)
 
         return panel
     }
