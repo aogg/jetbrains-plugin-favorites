@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,14 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.2 - 阶段二：核心功能
+    - 实现 BookmarkStorageHelper 持久化存储
+    - 实现 AddAnonymousBookmarkAction 添加匿名收藏动作
+    - 实现 AddMnemonicBookmarkAction 添加助记符收藏动作
+    - 实现 MnemonicSelectorDialog 助记符选择对话框
+    - 实现 BookmarkGutterHelper 编辑器图标显示
+    - 实现编辑器右键菜单集成
+    
     1.0.0 - 初始版本
     - 实现基础收藏功能框架
     ]]></change-notes>
@@ -27,9 +35,30 @@
     <extensions defaultExtensionNs="com.intellij">
         <!-- 插件启动活动 -->
         <postStartupActivity implementation="com.aogg.favorites.FavoritesPlugin"/>
+
+        <!-- 编辑器行号区域图标显示 -->
+        <codeInsight.lineMarkerProvider language="" implementationClass="com.aogg.favorites.helper.BookmarkGutterHelper"/>
+
+        <!-- 编辑器右键菜单 -->
+        <action id="Favorites.AddAnonymousBookmark" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F11"/>
+        </action>
+
+        <action id="Favorites.AddMnemonicBookmark" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
+            <add-to-group group-id="EditorPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmark"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
+        </action>
     </extensions>
 
     <actions>
-        <!-- 动作将在后续阶段添加 -->
+        <!-- 全局动作 -->
+        <action id="Favorites.AddAnonymousBookmarkGlobal" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F11"/>
+        </action>
+
+        <action id="Favorites.AddMnemonicBookmarkGlobal" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
+        </action>
     </actions>
 </idea-plugin>

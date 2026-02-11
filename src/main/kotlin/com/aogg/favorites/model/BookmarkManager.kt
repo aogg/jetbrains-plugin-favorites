@@ -1,5 +1,6 @@
 package com.aogg.favorites.model
 
+import com.aogg.favorites.helper.BookmarkStorageHelper
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
@@ -19,9 +20,14 @@ class BookmarkManager(private val project: Project) {
          */
         @JvmStatic
         fun getInstance(project: Project): BookmarkManager {
-            return project.service()
+            val manager = project.service<BookmarkManager>()
+            // 初始化时加载持久化数据
+            manager.loadFromStorage()
+            return manager
         }
     }
+
+    private val storageHelper = BookmarkStorageHelper.getInstance(project)
 
     // 所有收藏列表（按ID索引）
     private val bookmarks: MutableMap<String, Bookmark> = ConcurrentHashMap()
@@ -67,6 +73,9 @@ class BookmarkManager(private val project: Project) {
             }
         }
 
+        // 保存到持久化存储
+        saveToStorage()
+
         return true
     }
 
@@ -93,6 +102,9 @@ class BookmarkManager(private val project: Project) {
         } else if (bookmark.isFolderBookmark()) {
             folderBookmarks[bookmark.filePath]?.remove(bookmarkId)
         }
+
+        // 保存到持久化存储
+        saveToStorage()
 
         return true
     }
@@ -217,6 +229,9 @@ class BookmarkManager(private val project: Project) {
             }
         }
 
+        // 保存到持久化存储
+        saveToStorage()
+
         return true
     }
 
@@ -245,4 +260,46 @@ class BookmarkManager(private val project: Project) {
      * 获取助记符收藏数量
      */
     fun getMnemonicCount(): Int = mnemonicMap.size
+
+    /**
+     * 从持久化存储加载收藏
+     */
+    private fun loadFromStorage() {
+        val (anonymousList, mnemonicMap) = storageHelper.loadBookmarks()
+
+        // 清空现有数据
+        clearAll()
+
+        // 加载匿名收藏
+        anonymousList.forEach { bookmark ->
+            bookmarks[bookmark.id] = bookmark
+            anonymousBookmarks.add(bookmark)
+            if (bookmark.isFileBookmark()) {
+                fileBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
+            } else if (bookmark.isFolderBookmark()) {
+                folderBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
+            }
+        }
+
+        // 加载助记符收藏
+        mnemonicMap.forEach { (mnemonic, bookmark) ->
+            bookmarks[bookmark.id] = bookmark
+            this.mnemonicMap[mnemonic] = bookmark.id
+            if (bookmark.isFileBookmark()) {
+                fileBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
+            } else if (bookmark.isFolderBookmark()) {
+                folderBookmarks.getOrPut(bookmark.filePath) { mutableListOf() }.add(bookmark.id)
+            }
+        }
+    }
+
+    /**
+     * 保存收藏到持久化存储
+     */
+    private fun saveToStorage() {
+        val anonymousList = anonymousBookmarks.toList()
+        val mnemonicMap = mnemonicMap.mapValues { bookmarks[it.value]!! }
+            .filterKeys { it in '0'..'9' || it in 'A'..'Z' }
+        storageHelper.saveBookmarks(anonymousList, mnemonicMap)
+    }
 }
