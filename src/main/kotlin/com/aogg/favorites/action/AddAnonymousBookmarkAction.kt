@@ -3,6 +3,7 @@ package com.aogg.favorites.action
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
+import com.aogg.favorites.ui.BookmarksToolWindowPanel
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -82,6 +83,7 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
                 "已移除该行的匿名收藏",
                 "移除收藏"
             )
+            BookmarksToolWindowPanel.refreshToolWindow(project)
         } else {
             // 创建新的匿名收藏
             val bookmark = Bookmark(
@@ -99,6 +101,7 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
                     "已添加匿名收藏（行 ${lineNumber + 1}）",
                     "添加收藏成功"
                 )
+                BookmarksToolWindowPanel.refreshToolWindow(project)
             }
         }
     }
@@ -156,6 +159,9 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
         }
 
         Messages.showInfoMessage(project, message, "收藏操作")
+        if (successCount > 0 || removeCount > 0) {
+            BookmarksToolWindowPanel.refreshToolWindow(project)
+        }
     }
 
     /**
@@ -186,6 +192,7 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
             if (existingBookmarks.isNotEmpty()) {
                 existingBookmarks.forEach { bookmarkManager.removeBookmark(it.id) }
                 Messages.showInfoMessage(project, "已移除收藏", "移除收藏")
+                BookmarksToolWindowPanel.refreshToolWindow(project)
             } else {
                 val bookmark = Bookmark(
                     id = UUID.randomUUID().toString(),
@@ -198,6 +205,7 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
 
                 if (bookmarkManager.addBookmark(bookmark)) {
                     Messages.showInfoMessage(project, "已添加匿名收藏", "添加收藏成功")
+                    BookmarksToolWindowPanel.refreshToolWindow(project)
                 }
             }
         }
