@@ -1,0 +1,35 @@
+<idea-plugin>
+    <id>com.aogg.favorites</id>
+    <name>Favorites</name>
+    <version>1.0.1</version>
+    <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
+
+    <description><![CDATA[
+    收藏插件 - 提供代码行、文件和文件夹的收藏功能，支持匿名收藏和助记符收藏。
+    功能包括：
+    - 匿名收藏：无限制数量的收藏，在编辑器行号区域显示书签图标
+    - 助记符收藏：使用数字（0-9）或字母（A-Z）作为标识符，最多36个
+    - 收藏管理工具窗口：统一管理所有收藏
+    - 快速访问：弹出窗口快速跳转到收藏位置
+    ]]></description>
+
+    <change-notes><![CDATA[
+    1.0.0 - 初始版本
+    - 实现基础收藏功能框架
+    ]]></change-notes>
+
+    <!-- 兼容的IDE版本 -->
+    <idea-version since-build="233" until-build="242.*"/>
+
+    <!-- 依赖 -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- 插件启动活动 -->
+        <postStartupActivity implementation="com.aogg.favorites.FavoritesPlugin"/>
+    </extensions>
+
+    <actions>
+        <!-- 动作将在后续阶段添加 -->
+    </actions>
+</idea-plugin>
