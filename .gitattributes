@@ -1,0 +1,5 @@
+# 行尾锁定：gradlew 必须是 LF，否则 Linux CI 上 shebang 带 \r 导致 exit 127
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+gradle/wrapper/gradle-wrapper.properties text eol=lf
+gradle/wrapper/gradle-wrapper.jar binary
