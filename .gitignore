@@ -12,6 +12,8 @@ out/
 
 # Build outputs
 *.jar
+# Gradle wrapper 必需文件，必须入库，否则 CI checkout 后 ./gradlew 无法启动
+!gradle/wrapper/gradle-wrapper.jar
 *.war
 *.zip
 *.tar.gz
