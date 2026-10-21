@@ -1,0 +1,59 @@
+# GitHub Actions 自动打包发布：
+# push 到 master 自动打包插件 zip，并发布到唯一的滚动 Release（tag=latest），
+# 每次构建删除旧 Release 后重建，保证仓库始终只有一个 latest Release。
+# 注意：不使用 PUBLISH_TOKEN，不发布到 JetBrains Marketplace，只出 zip 到 GitHub Release。
+name: Build and Publish Latest Release
+
+# 触发：push 到 master 分支 + 手动触发（workflow_dispatch）
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+# 串行化：同组任务排队执行，避免连续多次 push 时并发竞争「删建 latest Release」
+concurrency:
+  group: release-latest
+  cancel-in-progress: false
+
+# 创建/删除 Release 与 tag 需要 contents 写权限
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      # 拉取代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 配置 JDK 17（本插件 Kotlin/Java 编译需要 Java 17）
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 配置 Gradle（自带依赖与构建缓存）
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 打包插件 zip（产物在 build/distributions/*.zip）
+      - name: Build plugin
+        run: chmod +x gradlew && ./gradlew buildPlugin
+
+      # 删除旧的 latest Release 和 tag（不存在时忽略报错）
+      - name: Delete old latest release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/latest" || true
+
+      # 创建唯一的滚动 Release（tag=latest）并上传插件 zip
+      - name: Create latest release and upload zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create latest build/distributions/*.zip --title "Favorites - latest" --latest --notes "自动构建的插件 zip。安装：PhpStorm → Settings → Plugins → ⚙ → Install Plugin from Disk 选择该 zip。对应 commit: ${{ github.sha }}"

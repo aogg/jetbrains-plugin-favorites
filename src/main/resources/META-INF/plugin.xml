@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.11</version>
+    <version>1.0.12</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,10 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.12 - 构建发布
+    - 兼容 PhpStorm 2026.2（untilBuild 242.* → 262.*）
+    - 新增 GitHub Actions：push 到 master 自动打包插件 zip 并发布到唯一的滚动 Release（latest）
+
     1.0.11 - 阶段八：测试与文档
     - 新增 Bookmark 与 BookmarkManager 的单元测试，覆盖核心业务逻辑与路径/助记符处理
     - 配置 JUnit 5 与 Mockito 测试依赖，支持命令行与 IDE 中运行测试
@@ -65,7 +69,7 @@
     ]]></change-notes>
 
     <!-- 兼容的IDE版本 -->
-    <idea-version since-build="233" until-build="242.*"/>
+    <idea-version since-build="233" until-build="262.*"/>
 
     <!-- 依赖 -->
     <depends>com.intellij.modules.platform</depends>
