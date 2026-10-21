@@ -1,19 +1,33 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.0.12</version>
+    <version>1.1.0</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
-    收藏插件 - 提供代码行、文件和文件夹的收藏功能，支持匿名收藏和助记符收藏。
+    收藏插件 - 提供代码行、文件和文件夹的收藏功能，支持收藏列表分组、匿名收藏和助记符收藏。
     功能包括：
+    - 收藏列表：参照 PhpStorm 原生 Bookmarks 的列表分组，支持新建/重命名/删除列表与按列表排序
     - 匿名收藏：无限制数量的收藏，在编辑器行号区域显示书签图标
-    - 助记符收藏：使用数字（0-9）或字母（A-Z）作为标识符，最多36个
-    - 收藏管理工具窗口：统一管理所有收藏
+    - 助记符收藏：使用数字（0-9）或字母（A-Z）作为标识符，最多36个，项目内全局唯一
+    - 收藏管理工具窗口：列表/收藏两级树、实时过滤、排序、快速跳转
     - 快速访问：弹出窗口快速跳转到收藏位置
     ]]></description>
 
     <change-notes><![CDATA[
+    1.1.0 - 阶段A：入口修复与收藏列表重构
+    - 修复安装后无任何操作入口的问题：全部 action 从 extensions 移入 actions 段
+    - 新增"收藏"右键子菜单（编辑器/行号区/项目视图/编辑器标签页，均置底显示）
+    - 引入收藏列表（List）模型：新建/重命名/删除列表、收藏跨列表移动、按列表记忆排序方式；默认列表"收藏"不可删除
+    - favorites.xml 旧数据自动迁移：无列表信息的收藏全部归入默认列表"收藏"，不丢数据
+    - 工具窗口重构：ToolbarDecorator + 列表/收藏两级树（含收藏数徽标）、实时搜索过滤、TreeSpeedSearch、
+      排序下拉（按添加/描述/位置）、全部展开/折叠、Enter/双击跳转、F2 编辑描述、Del 删除、选中行收藏预览不抢焦点
+    - 助记符选择对话框改为 0-9/A-Z 网格，已占用项置灰禁用，可输入描述
+    - 添加/删除/移动收藏后强制刷新编辑器 gutter 图标
+    - 新增设置页（Settings → Tools → Favorites）与应用级/项目级状态持久化（隐藏原生入口、原生书签导入状态，供后续版本使用）
+    - 快捷键修复：工具窗口开关改为 Alt+2，移除与"跳转到收藏 [2]"冲突的 Ctrl+Alt+2；
+      保留 Ctrl+Alt+F11 / Ctrl+Alt+Shift+F11 / Ctrl+Alt+Shift+B / Ctrl+Alt+0-9 / Ctrl+Alt+A-Z
+
     1.0.12 - 构建发布
     - 兼容 PhpStorm 2026.2（untilBuild 242.* → 262.*）
     - 新增 GitHub Actions：push 到 master 自动打包插件 zip 并发布到唯一的滚动 Release（latest）
@@ -78,62 +92,47 @@
         <!-- 插件启动活动 -->
         <postStartupActivity implementation="com.aogg.favorites.FavoritesPlugin"/>
 
-        <!-- 工具窗口 -->
-        <toolWindow id="Favorites" secondary="true" anchor="bottom" factoryClass="com.aogg.favorites.ui.BookmarksToolWindowFactory" icon="AllIcons.Gutter.Bookmark"/>
+        <!-- 工具窗口（贴近 PhpStorm Bookmarks 习惯，停靠在左侧） -->
+        <toolWindow id="Favorites" anchor="left" factoryClass="com.aogg.favorites.ui.BookmarksToolWindowFactory" icon="AllIcons.Gutter.Bookmark"/>
 
         <!-- 编辑器行号区域图标显示 -->
         <codeInsight.lineMarkerProvider language="" implementationClass="com.aogg.favorites.helper.BookmarkGutterHelper"/>
 
-        <!-- 编辑器右键菜单 -->
-        <action id="Favorites.AddAnonymousBookmark" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F11"/>
-        </action>
-
-        <action id="Favorites.AddMnemonicBookmark" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
-            <add-to-group group-id="EditorPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmark"/>
-            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
-        </action>
-
-        <!-- 项目窗口右键菜单 -->
-        <action id="Favorites.AddAnonymousBookmarkProject" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
-            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
-        </action>
-
-        <action id="Favorites.AddMnemonicBookmarkProject" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
-            <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmarkProject"/>
-        </action>
-
-        <!-- 编辑器标签页右键菜单 -->
-        <action id="Favorites.AddAnonymousBookmarkTab" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
-            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
-        </action>
-
-        <action id="Favorites.AddMnemonicBookmarkTab" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
-            <add-to-group group-id="EditorTabPopupMenu" anchor="after" relative-to-action="Favorites.AddAnonymousBookmarkTab"/>
-        </action>
-
+        <!-- 设置页：Settings → Tools → Favorites -->
+        <applicationConfigurable parentId="tools" id="Favorites.Settings" displayName="Favorites"
+                                 instance="com.aogg.favorites.settings.FavoritesConfigurable"/>
     </extensions>
 
     <actions>
+        <!-- 收藏子菜单：编辑器右键 / 行号区右键 / 项目视图右键 / 编辑器标签页右键，均置底 -->
+        <group id="Favorites.Group" text="收藏" description="Favorites 收藏菜单" icon="AllIcons.Gutter.Bookmark" popup="true">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="EditorGutterPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+
+            <action id="Favorites.AddAnonymousBookmark" class="com.aogg.favorites.action.AddAnonymousBookmarkAction"
+                    text="添加匿名收藏" description="添加/移除匿名收藏">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F11"/>
+            </action>
+            <action id="Favorites.AddMnemonicBookmark" class="com.aogg.favorites.action.AddMnemonicBookmarkAction"
+                    text="添加助记符收藏" description="添加/移除助记符收藏">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
+            </action>
+        </group>
+
         <!-- 全局动作 -->
-        <action id="Favorites.AddAnonymousBookmarkGlobal" class="com.aogg.favorites.action.AddAnonymousBookmarkAction" text="添加匿名收藏">
-            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F11"/>
+        <action id="Favorites.ToggleBookmarksToolWindow" class="com.aogg.favorites.action.ToggleBookmarksToolWindowAction"
+                text="显示/隐藏收藏工具窗口" description="切换收藏工具窗口的显示状态">
+            <keyboard-shortcut keymap="$default" first-keystroke="alt 2"/>
         </action>
 
-        <action id="Favorites.AddMnemonicBookmarkGlobal" class="com.aogg.favorites.action.AddMnemonicBookmarkAction" text="添加助记符收藏">
-            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
-        </action>
-
-        <action id="Favorites.ToggleBookmarksToolWindow" class="com.aogg.favorites.action.ToggleBookmarksToolWindowAction" text="显示/隐藏收藏工具窗口">
-            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 2"/>
-        </action>
-
-        <action id="Favorites.ShowBookmarksPopup" class="com.aogg.favorites.action.ShowBookmarksPopupAction" text="显示收藏列表">
+        <action id="Favorites.ShowBookmarksPopup" class="com.aogg.favorites.action.ShowBookmarksPopupAction"
+                text="显示收藏列表" description="显示收藏快速访问弹出窗口">
             <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift B"/>
         </action>
 
-        <!-- 助记符跳转动作 (0-9) -->
+        <!-- 助记符跳转动作 (0-9)：Ctrl+Alt+0-9 -->
         <action id="Favorites.JumpToMnemonic.0" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [0]">
             <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 0"/>
         </action>
@@ -165,7 +164,7 @@
             <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt 9"/>
         </action>
 
-        <!-- 助记符跳转动作 (A-Z) -->
+        <!-- 助记符跳转动作 (A-Z)：Ctrl+Alt+A-Z -->
         <action id="Favorites.JumpToMnemonic.A" class="com.aogg.favorites.action.JumpToMnemonicBookmarkAction" text="跳转到收藏 [A]">
             <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt A"/>
         </action>

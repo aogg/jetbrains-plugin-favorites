@@ -1,8 +1,7 @@
 package com.aogg.favorites.listener
 
+import com.aogg.favorites.helper.BookmarkRefreshHelper
 import com.aogg.favorites.model.BookmarkManager
-import com.aogg.favorites.ui.BookmarksToolWindowPanel
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -73,8 +72,7 @@ class BookmarkProjectListener(private val project: Project) : BulkFileListener {
 
         if (changed) {
             // 刷新工具窗口与编辑器行标记（LineMarkerProvider 依赖 Daemon 刷新）
-            BookmarksToolWindowPanel.refreshToolWindow(project)
-            DaemonCodeAnalyzer.getInstance(project).restart()
+            BookmarkRefreshHelper.refreshAfterChange(project)
             if (removedCount > 0 || updatedCount > 0) {
                 log.info("收藏已同步：删除 $removedCount 条，更新 $updatedCount 条")
             }

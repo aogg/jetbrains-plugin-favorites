@@ -1,29 +1,41 @@
 package com.aogg.favorites.ui
 
+import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
+import com.intellij.util.ui.GridBag
+import com.intellij.util.ui.JBColor
+import com.intellij.util.ui.JBUI
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
-import com.intellij.util.ui.GridBag
+import java.awt.BorderLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
+import java.awt.GridLayout
+import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
-import javax.swing.JTextField
 
 /**
  * 助记符选择对话框
- * 显示可用和已用的标识符，支持输入描述信息
+ * 0-9 / A-Z 网格按钮，已占用项置灰禁用（当前助记符除外），可输入描述信息
  */
 class MnemonicSelectorDialog(
     project: Project,
-    private val currentMnemonic: Char? = null
+    private val currentMnemonic: Char? = null,
+    currentDescription: String? = null
 ) : DialogWrapper(project) {
 
+    companion object {
+        private val SELECTED_COLOR = JBColor(java.awt.Color(0x9FC6F7), java.awt.Color(0x2E436E))
+    }
+
     private val bookmarkManager = BookmarkManager.getInstance(project)
-    private val mnemonicField = JBTextField()
-    private val descriptionField = JBTextField()
+    private val descriptionField = JBTextField(currentDescription ?: "")
+
+    private val buttons = LinkedHashMap<Char, JButton>()
+    private var selectedButton: JButton? = null
 
     var selectedMnemonic: Char? = null
         private set
@@ -33,113 +45,75 @@ class MnemonicSelectorDialog(
     init {
         title = "选择助记符"
         init()
-        setupUI()
-    }
 
-    private fun setupUI() {
-        // 设置助记符输入框
-        mnemonicField.columns = 1
-        // 限制输入长度为1
-        (mnemonicField.document as? javax.swing.text.PlainDocument)?.documentFilter = object : javax.swing.text.DocumentFilter() {
-            override fun replace(fb: javax.swing.text.DocumentFilter.FilterBypass?, offset: Int, length: Int, text: String?, attrs: javax.swing.text.AttributeSet?) {
-                if (text != null && (fb?.document?.length ?: 0) - length + text.length > 1) {
-                    return
-                }
-                super.replace(fb, offset, length, text, attrs)
-            }
-            
-            override fun insertString(fb: javax.swing.text.DocumentFilter.FilterBypass?, offset: Int, string: String?, attrs: javax.swing.text.AttributeSet?) {
-                if (string != null && (fb?.document?.length ?: 0) + string.length > 1) {
-                    return
-                }
-                super.insertString(fb, offset, string, attrs)
-            }
-        }
-        mnemonicField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
-            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) {
-                validateInput()
-            }
-
-            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) {
-                validateInput()
-            }
-
-            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) {
-                validateInput()
-            }
-        })
-
-        // 如果已有助记符，预填充
-        if (currentMnemonic != null) {
-            mnemonicField.text = currentMnemonic.toString()
-        }
-
-        // 设置描述输入框
-        descriptionField.columns = 30
+        // 初始可用状态：已有助记符时默认选中
+        okAction.isEnabled = currentMnemonic != null
+        currentMnemonic?.let { selectMnemonic(it) }
     }
 
     override fun createCenterPanel(): JComponent {
-        val panel = JPanel(GridBagLayout())
-        val gb = GridBag()
+        val panel = JPanel(BorderLayout(0, 8))
 
-        // 助记符标签和输入框
-        panel.add(JBLabel("助记符 (0-9 或 A-Z):"), gb.nextLine().next().weightx(0.0).anchor(GridBag.WEST))
-        panel.add(mnemonicField, gb.next().weightx(1.0).fillCellHorizontally())
+        val hintLabel = JBLabel("点击选择助记符（灰色为已占用，不可选）：")
+        panel.add(hintLabel, BorderLayout.NORTH)
 
-        // 描述标签和输入框
-        panel.add(JBLabel("描述 (可选):"), gb.nextLine().next().weightx(0.0).anchor(GridBag.WEST))
-        panel.add(descriptionField, gb.next().weightx(1.0).fillCellHorizontally())
-
-        // 可用助记符提示
-        val availableMnemonics = bookmarkManager.getAvailableMnemonics()
-        val usedMnemonics = bookmarkManager.getUsedMnemonics()
-        val hintText = buildString {
-            append("可用: ")
-            if (availableMnemonics.isNotEmpty()) {
-                append(availableMnemonics.take(10).joinToString(", "))
-                if (availableMnemonics.size > 10) {
-                    append("... (共 ${availableMnemonics.size} 个)")
-                }
+        // 0-9 / A-Z 网格（每行10个）
+        val used = bookmarkManager.getUsedMnemonics()
+        val grid = JPanel(GridLayout(0, 10, 4, 4))
+        for (mnemonic in ('0'..'9') + ('A'..'Z')) {
+            val available = mnemonic == currentMnemonic || !used.contains(mnemonic)
+            val button = JButton(mnemonic.toString())
+            button.isFocusable = false
+            button.isOpaque = true
+            button.margin = JBUI.insets(2)
+            button.preferredSize = JBUI.size(44, 34)
+            button.isEnabled = available
+            if (!available) {
+                button.toolTipText = "[$mnemonic] 已被占用"
             } else {
-                append("无")
+                button.toolTipText = "助记符 [$mnemonic]"
+                button.addActionListener { selectMnemonic(mnemonic) }
             }
-            if (usedMnemonics.isNotEmpty()) {
-                append(" | 已用: ")
-                append(usedMnemonics.sorted().joinToString(", "))
-            }
+            buttons[mnemonic] = button
+            grid.add(button)
         }
-        val hintLabel = JBLabel(hintText)
+        panel.add(grid, BorderLayout.CENTER)
+
+        // 描述输入
+        val descriptionPanel = JPanel(GridBagLayout())
+        val gb = GridBag()
+        descriptionPanel.add(JBLabel("描述 (可选):"), gb.nextLine().next().weightx(0.0).anchor(GridBag.WEST))
+        descriptionField.columns = 30
+        descriptionPanel.add(descriptionField, gb.next().weightx(1.0).fillCellHorizontally())
         val gbc = gb.nextLine().next().anchor(GridBag.WEST) as GridBagConstraints
         gbc.gridwidth = GridBagConstraints.REMAINDER
-        panel.add(hintLabel, gbc)
+        descriptionPanel.add(JBLabel(" "), gbc)
 
+        panel.add(descriptionPanel, BorderLayout.SOUTH)
         return panel
     }
 
-    private fun validateInput() {
-        val text = mnemonicField.text.trim()
-        val isValid = when {
-            text.isEmpty() -> false
-            text.length == 1 -> {
-                val char = text[0]
-                (char in '0'..'9' || char in 'A'..'Z') && 
-                (char == currentMnemonic || bookmarkManager.isMnemonicAvailable(char))
-            }
-            else -> false
-        }
-        okAction.isEnabled = isValid
+    /**
+     * 选中助记符（高亮按钮）
+     */
+    private fun selectMnemonic(mnemonic: Char) {
+        val button = buttons[mnemonic] ?: return
+        if (!button.isEnabled) return
+        selectedButton?.background = null
+        button.background = SELECTED_COLOR
+        selectedButton = button
+        selectedMnemonic = mnemonic
+        okAction.isEnabled = true
     }
 
     override fun doOKAction() {
-        val text = mnemonicField.text.trim()
-        if (text.length == 1) {
-            val char = text[0]
-            if (char in '0'..'9' || char in 'A'..'Z') {
-                selectedMnemonic = char
-                description = descriptionField.text.takeIf { it.isNotBlank() }
-                super.doOKAction()
-            }
+        val mnemonic = selectedMnemonic
+        if (mnemonic == null || !Bookmark.isValidMnemonic(mnemonic)) {
+            // 未选择助记符时不关闭对话框
+            return
         }
+        description = descriptionField.text.trim().ifEmpty { null }
+        super.doOKAction()
     }
 
     override fun doCancelAction() {

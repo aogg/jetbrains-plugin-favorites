@@ -1,9 +1,9 @@
 package com.aogg.favorites.action
 
+import com.aogg.favorites.helper.BookmarkRefreshHelper
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
-import com.aogg.favorites.ui.BookmarksToolWindowPanel
 import com.aogg.favorites.ui.MnemonicSelectorDialog
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -117,7 +117,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
                     "已添加助记符收藏 $mnemonicText$descText（行 ${lineNumber + 1}）",
                     "添加收藏成功"
                 )
-                BookmarksToolWindowPanel.refreshToolWindow(project)
+                BookmarkRefreshHelper.refreshAfterChange(project)
             } else {
                 Messages.showErrorDialog(
                     project,
@@ -194,7 +194,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
                     "已添加助记符收藏 $mnemonicText$descText（$typeText）",
                     "添加收藏成功"
                 )
-                BookmarksToolWindowPanel.refreshToolWindow(project)
+                BookmarkRefreshHelper.refreshAfterChange(project)
             } else {
                 Messages.showErrorDialog(
                     project,
@@ -260,7 +260,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
                         "已添加助记符收藏 $mnemonicText$descText",
                         "添加收藏成功"
                     )
-                    BookmarksToolWindowPanel.refreshToolWindow(project)
+                    BookmarkRefreshHelper.refreshAfterChange(project)
                 } else {
                     Messages.showErrorDialog(
                         project,
@@ -284,8 +284,15 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         }
     }
 
+    /**
+     * 按上下文启用：编辑器→行收藏；项目视图/标签页→文件/文件夹收藏。
+     * 无有效上下文时隐藏，避免灰色无效项常驻。
+     */
     override fun update(e: AnActionEvent) {
         val project = e.project
-        e.presentation.isEnabled = project != null
+        val hasContext = project != null &&
+            (e.getData(CommonDataKeys.EDITOR) != null ||
+                !e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY).isNullOrEmpty())
+        e.presentation.isEnabledAndVisible = hasContext
     }
 }

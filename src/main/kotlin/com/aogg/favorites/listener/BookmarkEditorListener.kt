@@ -1,8 +1,7 @@
 package com.aogg.favorites.listener
 
+import com.aogg.favorites.helper.BookmarkRefreshHelper
 import com.aogg.favorites.model.BookmarkManager
-import com.aogg.favorites.ui.BookmarksToolWindowPanel
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -34,8 +33,7 @@ class BookmarkEditorListener(private val project: Project) : FileEditorManagerLi
 
         val removed = BookmarkManager.getInstance(project).cleanupInvalidLineBookmarks(rel, document.lineCount)
         if (removed > 0) {
-            BookmarksToolWindowPanel.refreshToolWindow(project)
-            DaemonCodeAnalyzer.getInstance(project).restart()
+            BookmarkRefreshHelper.refreshAfterChange(project)
             log.info("已清理无效行收藏：$removed 条，文件：$rel")
         }
     }

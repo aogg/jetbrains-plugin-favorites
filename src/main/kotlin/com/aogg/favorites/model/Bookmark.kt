@@ -9,9 +9,10 @@ import java.io.Serializable
  * @param type 收藏类型（代码行/文件/文件夹）
  * @param filePath 文件路径（相对于项目根目录）
  * @param lineNumber 行号（仅代码行收藏有效，文件/文件夹收藏为-1）
- * @param mnemonic 助记符（数字0-9或字母A-Z，匿名收藏为null）
+ * @param mnemonic 助记符（数字0-9或字母A-Z，匿名收藏为null；项目内全局唯一、跨列表）
  * @param description 描述信息（可选）
  * @param createdTime 创建时间戳
+ * @param listName 所属收藏列表名称（缺失时归入默认列表 [DEFAULT_LIST_NAME]）
  */
 data class Bookmark(
     val id: String,
@@ -20,11 +21,24 @@ data class Bookmark(
     val lineNumber: Int = -1,
     val mnemonic: Char? = null,
     val description: String? = null,
-    val createdTime: Long = System.currentTimeMillis()
+    val createdTime: Long = System.currentTimeMillis(),
+    val listName: String = DEFAULT_LIST_NAME
 ) : Serializable {
 
     companion object {
         private const val serialVersionUID = 1L
+
+        /**
+         * 默认收藏列表名称（旧版本数据迁移时固定归入该列表，不可删除/重命名）
+         */
+        const val DEFAULT_LIST_NAME = "收藏"
+
+        /**
+         * 助记符是否合法（数字0-9或字母A-Z）
+         */
+        @JvmStatic
+        fun isValidMnemonic(mnemonic: Char): Boolean =
+            mnemonic in '0'..'9' || mnemonic in 'A'..'Z'
     }
 
     /**

@@ -4,211 +4,415 @@ import com.aogg.favorites.helper.BookmarkIconHelper
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
+import com.aogg.favorites.model.ListInfo
 import com.intellij.icons.AllIcons
-import com.intellij.ide.util.treeView.AbstractTreeBuilder
-import com.intellij.ide.util.treeView.AbstractTreeStructure
-import com.intellij.ide.util.treeView.NodeDescriptor
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.Separator
+import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.actionSystem.ActionGroup
-import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.ActionPopupMenu
-import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.ui.TreeUIHelper
 import com.intellij.ui.treeStructure.Tree
+import java.awt.event.ActionEvent
+import java.awt.event.KeyEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
+import java.io.File
+import java.util.Locale
+import javax.swing.AbstractAction
+import javax.swing.JComponent
+import javax.swing.KeyStroke
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreePath
 
 /**
- * 收藏树组件
- * 支持双击跳转和右键菜单
+ * 列表节点用户对象（树第一层）
  */
-class BookmarksTree(project: Project) : Tree() {
-    
+data class BookmarkListNode(
+    val info: ListInfo,
+    val totalCount: Int
+) {
+    override fun toString(): String = "${info.name} ($totalCount)"
+}
+
+/**
+ * 收藏节点用户对象（树第二层）
+ * toString 同时作为 TreeSpeedSearch 的匹配文本
+ */
+class BookmarkNode(val bookmark: Bookmark) {
+    override fun toString(): String = formatBookmarkNodeText(bookmark)
+}
+
+internal fun formatBookmarkNodeText(bookmark: Bookmark): String {
+    val displayName = bookmark.getDisplayName()
+    val location = when (bookmark.type) {
+        BookmarkType.LINE -> "${bookmark.filePath}:${bookmark.lineNumber + 1}"
+        BookmarkType.FILE -> bookmark.filePath
+        BookmarkType.FOLDER -> bookmark.filePath
+    }
+    val prefix = if (bookmark.isMnemonic()) "[${bookmark.mnemonic}] " else ""
+    return "$prefix$displayName - $location"
+}
+
+/**
+ * 收藏树组件：第一层=列表（含收藏数徽标文案），第二层=收藏项
+ *
+ * 交互：
+ * - Enter / 双击 = 跳转（行→编辑器定位；文件→打开；文件夹→Project 视图选中）
+ * - F2 = 编辑描述、Del = 删除（通过 [Interactions] 回调到面板实现）
+ * - 右键菜单：跳转/编辑描述/设置助记符/移动到列表/新建列表/重命名列表/删除列表/删除收藏
+ * - 选中行收藏时预览打开文件但不抢焦点（openFile(file, false)）
+ * - 装 TreeSpeedSearch（TreeUIHelper.installTreeSpeedSearch）
+ */
+class BookmarksTree(
+    private val project: Project,
+    private val interactions: Interactions
+) : Tree() {
+
+    /**
+     * 面板侧交互回调
+     */
+    interface Interactions {
+        fun editSelectedBookmark()
+        fun deleteSelected()
+        fun setMnemonicForSelected()
+        fun moveSelectedTo(listName: String)
+        fun createList()
+        fun renameList(listName: String?)
+        fun deleteList(listName: String?)
+    }
+
+    companion object {
+        private val log = Logger.getInstance(BookmarksTree::class.java)
+
+        private const val ACTION_KEY_JUMP = "favorites.jump"
+        private const val ACTION_KEY_EDIT = "favorites.edit"
+        private const val ACTION_KEY_DELETE = "favorites.delete"
+    }
+
     private val bookmarkManager = BookmarkManager.getInstance(project)
-    private val projectInstance = project
-    
+
+    private var filterText: String = ""
+
     init {
-        // 设置树模型
-        model = DefaultTreeModel(createTreeModel())
-        
-        // 启用双击跳转
-        addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseClicked(e: java.awt.event.MouseEvent) {
+        isRootVisible = false
+        showsRootHandles = true
+        model = DefaultTreeModel(DefaultMutableTreeNode("root"))
+        cellRenderer = BookmarksTreeCellRenderer()
+
+        // 速度搜索（按节点文本匹配）
+        TreeUIHelper.getInstance().installTreeSpeedSearch(this)
+
+        // 双击跳转 + 右键菜单
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount == 2) {
-                    val path = getPathForLocation(e.x, e.y) ?: return
-                    val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
-                    val bookmark = node.userObject as? Bookmark ?: return
+                    val bookmark = getSelectedBookmarks().firstOrNull() ?: return
                     navigateToBookmark(bookmark)
                 }
             }
-        })
-        
-        // 设置单元格渲染器
-        cellRenderer = BookmarksTreeCellRenderer()
-        
-        // 添加右键菜单
-        addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mousePressed(e: java.awt.event.MouseEvent) {
-                if (e.isPopupTrigger) {
-                    showPopupMenu(e)
-                }
+
+            override fun mousePressed(e: MouseEvent) {
+                if (e.isPopupTrigger) showPopupMenu(e)
             }
-            
-            override fun mouseReleased(e: java.awt.event.MouseEvent) {
-                if (e.isPopupTrigger) {
-                    showPopupMenu(e)
-                }
+
+            override fun mouseReleased(e: MouseEvent) {
+                if (e.isPopupTrigger) showPopupMenu(e)
             }
         })
-    }
-    
-    /**
-     * 显示右键菜单
-     */
-    private fun showPopupMenu(e: java.awt.event.MouseEvent) {
-        val path = getPathForLocation(e.x, e.y) ?: return
-        val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
-        val bookmark = node.userObject as? Bookmark ?: return
-        
-        // 选中节点
-        selectionPath = path
-        
-        // 创建动作组
-        val actionGroup = DefaultActionGroup().apply {
-            add(com.aogg.favorites.action.EditBookmarkAction())
-            add(com.aogg.favorites.action.DeleteBookmarkAction())
+
+        // Enter=跳转 / F2=编辑描述 / Del=删除
+        registerKeyStrokes()
+
+        // 选中行收藏时预览打开文件（不抢焦点）
+        addTreeSelectionListener {
+            previewSelectedLineBookmark()
         }
-        
-        // 创建弹出菜单
-        val popupMenu = ActionManager.getInstance().createActionPopupMenu("FavoritesToolWindowPopupMenu", actionGroup)
-        popupMenu.component.show(this, e.x, e.y)
+
+        refresh()
     }
-    
+
     /**
-     * 创建树模型
+     * 重建树模型
+     *
+     * @param filter 过滤关键字（匹配描述/文件名/列表名，空串表示不过滤）
      */
-    private fun createTreeModel(): DefaultMutableTreeNode {
-        val root = DefaultMutableTreeNode("收藏")
-        
-        // 获取所有收藏
-        val allBookmarks = bookmarkManager.getAllBookmarks()
-        
-        // 按类型分组
-        val lineBookmarks = allBookmarks.filter { it.type == BookmarkType.LINE }
-        val fileBookmarks = allBookmarks.filter { it.type == BookmarkType.FILE }
-        val folderBookmarks = allBookmarks.filter { it.type == BookmarkType.FOLDER }
-        
-        // 添加代码行收藏节点
-        if (lineBookmarks.isNotEmpty()) {
-            val lineNode = DefaultMutableTreeNode("代码行收藏 (${lineBookmarks.size})")
-            lineBookmarks.forEach { bookmark ->
-                lineNode.add(DefaultMutableTreeNode(bookmark))
+    fun refresh(filter: String = filterText) {
+        filterText = filter
+        val query = filterText.trim().lowercase(Locale.ROOT)
+
+        val root = DefaultMutableTreeNode("root")
+        for (listInfo in bookmarkManager.getLists()) {
+            val allBookmarks = bookmarkManager.getBookmarksByList(listInfo.name)
+            val listMatches = query.isEmpty() || listInfo.name.lowercase(Locale.ROOT).contains(query)
+            val visibleBookmarks = if (query.isEmpty()) {
+                allBookmarks
+            } else if (listMatches) {
+                allBookmarks
+            } else {
+                allBookmarks.filter { bookmarkMatches(it, query) }
             }
-            root.add(lineNode)
+            if (query.isNotEmpty() && !listMatches && visibleBookmarks.isEmpty()) continue
+
+            val listNode = DefaultMutableTreeNode(BookmarkListNode(listInfo, allBookmarks.size))
+            visibleBookmarks.forEach { listNode.add(DefaultMutableTreeNode(BookmarkNode(it))) }
+            root.add(listNode)
         }
-        
-        // 添加文件收藏节点
-        if (fileBookmarks.isNotEmpty()) {
-            val fileNode = DefaultMutableTreeNode("文件收藏 (${fileBookmarks.size})")
-            fileBookmarks.forEach { bookmark ->
-                fileNode.add(DefaultMutableTreeNode(bookmark))
-            }
-            root.add(fileNode)
-        }
-        
-        // 添加文件夹收藏节点
-        if (folderBookmarks.isNotEmpty()) {
-            val folderNode = DefaultMutableTreeNode("文件夹收藏 (${folderBookmarks.size})")
-            folderBookmarks.forEach { bookmark ->
-                folderNode.add(DefaultMutableTreeNode(bookmark))
-            }
-            root.add(folderNode)
-        }
-        
-        return root
+
+        model = DefaultTreeModel(root)
+        // 列表数量少，默认全部展开
+        expandAllRows()
     }
-    
+
     /**
-     * 刷新树
+     * 全部展开
      */
-    fun refresh() {
-        model = DefaultTreeModel(createTreeModel())
-        expandRow(0)
+    fun expandAllRows() {
+        for (i in 0 until rowCount) {
+            expandRow(i)
+        }
     }
-    
+
     /**
-     * 导航到收藏位置
+     * 全部折叠
      */
-    private fun navigateToBookmark(bookmark: Bookmark) {
-        // 获取项目根目录
-        val projectBaseDir = projectInstance.baseDir ?: return
-        
-        // 构建完整文件路径
-        val filePath = if (java.io.File(bookmark.filePath).isAbsolute) {
-            bookmark.filePath
-        } else {
-            java.io.File(projectBaseDir.path, bookmark.filePath).absolutePath
-        }
-        
-        // 查找虚拟文件
-        val virtualFile = LocalFileSystem.getInstance().findFileByPath(filePath) ?: return
-        
-        if (!virtualFile.exists()) {
-            return
-        }
-        
-        // 打开文件
-        val fileEditorManager = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(projectInstance)
-        fileEditorManager.openFile(virtualFile, true)
-        
-        // 如果是代码行收藏，跳转到指定行
-        if (bookmark.type == BookmarkType.LINE && bookmark.lineNumber > 0) {
-            // 等待文件打开
-            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                val editor = fileEditorManager.selectedTextEditor ?: return@invokeLater
-                val document = editor.document
-                if (bookmark.lineNumber <= document.lineCount) {
-                    val lineStartOffset = document.getLineStartOffset(bookmark.lineNumber - 1)
-                    editor.caretModel.moveToOffset(lineStartOffset)
-                    editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.CENTER)
-                }
-            }
+    fun collapseAllRows() {
+        for (i in rowCount - 1 downTo 0) {
+            collapseRow(i)
         }
     }
-    
+
     /**
-     * 获取选中的收藏
-     */
-    fun getSelectedBookmark(): Bookmark? {
-        val selectedNode = selectionPath?.lastPathComponent as? DefaultMutableTreeNode ?: return null
-        return selectedNode.userObject as? Bookmark
-    }
-    
-    /**
-     * 获取所有选中的收藏
+     * 获取选中的收藏（多选）
      */
     fun getSelectedBookmarks(): List<Bookmark> {
-        return selectionPaths?.mapNotNull { path ->
-            val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return@mapNotNull null
-            node.userObject as? Bookmark
-        } ?: emptyList()
+        return selectionPaths
+            ?.mapNotNull { path ->
+                (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? BookmarkNode
+            }
+            ?.map { it.bookmark }
+            ?: emptyList()
+    }
+
+    /**
+     * 获取当前选中上下文对应的列表名：
+     * 选中列表节点→该列表名；选中收藏→其所属列表名
+     */
+    fun getSelectedListName(): String? {
+        val node = selectionPath?.lastPathComponent as? DefaultMutableTreeNode ?: return null
+        return when (val userObject = node.userObject) {
+            is BookmarkListNode -> userObject.info.name
+            is BookmarkNode -> userObject.bookmark.listName
+            else -> null
+        }
+    }
+
+    /**
+     * 跳转到收藏位置（行→编辑器定位；文件→打开；文件夹→Project 视图选中）
+     */
+    fun navigateToBookmark(bookmark: Bookmark) {
+        val file = resolveVirtualFile(bookmark)
+        if (file == null || !file.exists()) {
+            return
+        }
+
+        when {
+            bookmark.isFolderBookmark() -> {
+                try {
+                    // 选中到 Project 视图（不抢焦点）
+                    com.intellij.ide.projectView.ProjectView.getInstance(project).select(null, file, false)
+                } catch (e: Exception) {
+                    log.warn("在 Project 视图中选中文件夹失败：${bookmark.filePath}", e)
+                }
+            }
+
+            else -> {
+                val editorManager = FileEditorManager.getInstance(project)
+                editorManager.openFile(file, true)
+
+                // 行收藏：定位到指定行（lineNumber 为 0 基）
+                if (bookmark.isLineBookmark() && bookmark.lineNumber >= 0) {
+                    ApplicationManager.getApplication().invokeLater {
+                        val editor = FileEditorManager.getInstance(project).selectedTextEditor ?: return@invokeLater
+                        val document = editor.document
+                        if (bookmark.lineNumber < document.lineCount) {
+                            val offset = document.getLineStartOffset(bookmark.lineNumber)
+                            editor.caretModel.moveToOffset(offset)
+                            editor.scrollingModel.scrollToCaret(ScrollType.CENTER)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 右键菜单
+     */
+    private fun showPopupMenu(e: MouseEvent) {
+        val path = getPathForLocation(e.x, e.y) ?: return
+        selectionPath = path
+
+        val group = DefaultActionGroup()
+        val selectedBookmarks = getSelectedBookmarks()
+        val listName = getSelectedListName()
+
+        if (selectedBookmarks.isNotEmpty()) {
+            group.add(object : AnAction("跳转", "跳转到收藏位置", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    selectedBookmarks.firstOrNull()?.let { navigateToBookmark(it) }
+                }
+            })
+            group.add(object : AnAction("编辑描述", "编辑收藏的描述", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.editSelectedBookmark()
+                }
+            })
+            group.add(object : AnAction("设置助记符", "设置或修改收藏的助记符", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.setMnemonicForSelected()
+                }
+            })
+            group.add(buildMoveToListGroup(selectedBookmarks))
+            group.add(Separator.getInstance())
+        }
+
+        group.add(object : AnAction("新建列表", "新建一个收藏列表", null) {
+            override fun actionPerformed(e: AnActionEvent) {
+                interactions.createList()
+            }
+        })
+
+        if (listName != null) {
+            group.add(object : AnAction("重命名列表", "重命名选中的列表（默认列表不可重命名）", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.renameList(listName)
+                }
+            })
+            if (listName != Bookmark.DEFAULT_LIST_NAME) {
+                group.add(object : AnAction("删除列表", "删除选中的列表，其收藏并入默认列表", null) {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        interactions.deleteList(listName)
+                    }
+                })
+            }
+        }
+
+        if (selectedBookmarks.isNotEmpty()) {
+            group.add(Separator.getInstance())
+            group.add(object : AnAction("删除收藏", "删除选中的收藏", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.deleteSelected()
+                }
+            })
+        }
+
+        val popup = ActionManager.getInstance()
+            .createActionPopupMenu("FavoritesToolWindowPopupMenu", group)
+        popup.component.show(this, e.x, e.y)
+    }
+
+    /**
+     * 构建"移动到列表▸"子菜单（列出全部列表，当前所属列表置灰）
+     */
+    private fun buildMoveToListGroup(selectedBookmarks: List<Bookmark>): DefaultActionGroup {
+        val group = DefaultActionGroup("移动到列表", true)
+        val currentListName = selectedBookmarks.firstOrNull()?.listName
+        for (info in bookmarkManager.getLists()) {
+            val targetName = info.name
+            group.add(object : AnAction(targetName, "移动到列表「$targetName」", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.moveSelectedTo(targetName)
+                }
+
+                override fun update(e: AnActionEvent) {
+                    e.presentation.isEnabled = targetName != currentListName
+                }
+            })
+        }
+        return group
+    }
+
+    private fun registerKeyStrokes() {
+        val inputMap = getInputMap(JComponent.WHEN_FOCUSED)
+        val actionMap = getActionMap()
+
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), ACTION_KEY_JUMP)
+        actionMap.put(ACTION_KEY_JUMP, object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent) {
+                getSelectedBookmarks().firstOrNull()?.let { navigateToBookmark(it) }
+            }
+        })
+
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_F2, 0), ACTION_KEY_EDIT)
+        actionMap.put(ACTION_KEY_EDIT, object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent) {
+                interactions.editSelectedBookmark()
+            }
+        })
+
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), ACTION_KEY_DELETE)
+        actionMap.put(ACTION_KEY_DELETE, object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent) {
+                interactions.deleteSelected()
+            }
+        })
+    }
+
+    /**
+     * 选中行收藏时预览打开文件但不抢焦点
+     */
+    private fun previewSelectedLineBookmark() {
+        val bookmark = getSelectedBookmarks().singleOrNull() ?: return
+        if (!bookmark.isLineBookmark()) return
+        val file = resolveVirtualFile(bookmark) ?: return
+        try {
+            FileEditorManager.getInstance(project).openFile(file, false)
+        } catch (e: Exception) {
+            log.warn("预览打开文件失败：${bookmark.filePath}", e)
+        }
+    }
+
+    private fun bookmarkMatches(bookmark: Bookmark, query: String): Boolean {
+        val fileName = bookmark.filePath.substringAfterLast('/')
+        return bookmark.description?.lowercase(Locale.ROOT)?.contains(query) == true ||
+            fileName.lowercase(Locale.ROOT).contains(query) ||
+            bookmark.filePath.lowercase(Locale.ROOT).contains(query) ||
+            bookmark.listName.lowercase(Locale.ROOT).contains(query)
+    }
+
+    private fun resolveVirtualFile(bookmark: Bookmark): VirtualFile? {
+        val basePath = project.basePath ?: return null
+        val absolutePath = if (File(bookmark.filePath).isAbsolute) {
+            bookmark.filePath
+        } else {
+            File(basePath, bookmark.filePath).absolutePath
+        }
+        // findFileByPath 需要正斜杠风格路径
+        val normalized = absolutePath.replace('\\', '/')
+        return LocalFileSystem.getInstance().findFileByPath(normalized)
     }
 }
 
 /**
- * 收藏树单元格渲染器
+ * 收藏树单元格渲染器：列表节点显示"名称 (收藏数)"，收藏节点显示描述/助记符与位置
  */
 class BookmarksTreeCellRenderer : javax.swing.tree.DefaultTreeCellRenderer() {
-    
+
     init {
-        // 设置默认图标
         leafIcon = AllIcons.Gutter.Bookmark
         closedIcon = AllIcons.Nodes.Folder
         openIcon = AllIcons.Nodes.Folder
     }
-    
+
     override fun getTreeCellRendererComponent(
         tree: javax.swing.JTree?,
         value: Any?,
@@ -219,46 +423,26 @@ class BookmarksTreeCellRenderer : javax.swing.tree.DefaultTreeCellRenderer() {
         hasFocus: Boolean
     ): java.awt.Component {
         super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus)
-        
-        val node = value as? DefaultMutableTreeNode ?: return this
-        val userObject = node.userObject
-        
-        when {
-            // 根节点或分组节点
-            userObject is String -> {
-                text = userObject
+
+        val node = value as? DefaultMutableTreeNode
+        when (val userObject = node?.userObject) {
+            // 列表节点（含收藏数徽标文案）
+            is BookmarkListNode -> {
+                text = userObject.toString()
                 icon = AllIcons.Nodes.Folder
             }
             // 收藏节点
-            userObject is Bookmark -> {
-                val bookmark = userObject
-                text = formatBookmarkText(bookmark)
-                icon = if (bookmark.isMnemonic()) {
+            is BookmarkNode -> {
+                val bookmark = userObject.bookmark
+                text = formatBookmarkNodeText(bookmark)
+                icon = if (bookmark.isMnemonic() && bookmark.mnemonic != null) {
                     BookmarkIconHelper.getMnemonicIcon(bookmark.mnemonic!!)
                 } else {
                     BookmarkIconHelper.ANONYMOUS_ICON
                 }
             }
         }
-        
+
         return this
-    }
-    
-    /**
-     * 格式化收藏显示文本
-     */
-    private fun formatBookmarkText(bookmark: Bookmark): String {
-        val displayName = bookmark.getDisplayName()
-        val location = when (bookmark.type) {
-            BookmarkType.LINE -> "${bookmark.filePath}:${bookmark.lineNumber}"
-            BookmarkType.FILE -> bookmark.filePath
-            BookmarkType.FOLDER -> bookmark.filePath
-        }
-        
-        return if (bookmark.isMnemonic()) {
-            "[${bookmark.mnemonic}] $displayName - $location"
-        } else {
-            "$displayName - $location"
-        }
     }
 }

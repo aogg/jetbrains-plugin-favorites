@@ -26,6 +26,29 @@ class BookmarkTest {
         assertTrue(bookmark.isLineBookmark(), "应为行收藏")
         assertFalse(bookmark.isFileBookmark(), "不应为文件收藏")
         assertFalse(bookmark.isFolderBookmark(), "不应为文件夹收藏")
+        assertEquals("收藏", bookmark.listName, "未指定列表时应默认归入默认列表「收藏」")
+    }
+
+    @Test
+    fun `list name should be kept when provided`() {
+        val bookmark = Bookmark(
+            id = "8",
+            type = BookmarkType.FILE,
+            filePath = "src/Test.php",
+            listName = "工作"
+        )
+        assertEquals("工作", bookmark.listName)
+    }
+
+    @Test
+    fun `valid mnemonic check should only allow 0-9 and A-Z`() {
+        assertTrue(Bookmark.isValidMnemonic('0'))
+        assertTrue(Bookmark.isValidMnemonic('9'))
+        assertTrue(Bookmark.isValidMnemonic('A'))
+        assertTrue(Bookmark.isValidMnemonic('Z'))
+        assertFalse(Bookmark.isValidMnemonic('a'))
+        assertFalse(Bookmark.isValidMnemonic('z'))
+        assertFalse(Bookmark.isValidMnemonic('!'))
     }
 
     @Test

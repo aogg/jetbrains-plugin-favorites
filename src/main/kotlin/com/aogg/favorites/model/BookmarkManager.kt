@@ -9,7 +9,12 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 收藏管理器（单例）
- * 负责收藏的增删改查、持久化存储和助记符冲突检测
+ * 负责收藏的增删改查、收藏列表（List）管理、持久化存储和助记符冲突检测
+ *
+ * 列表模型约束：
+ * - 助记符在项目内全局唯一（跨列表），跳转快捷键按助记符跨列表查找
+ * - 默认列表 [Bookmark.DEFAULT_LIST_NAME] 不可删除/重命名
+ * - 删除列表时其收藏全部并入默认列表
  */
 @Service(Service.Level.PROJECT)
 class BookmarkManager(private val project: Project) {
@@ -34,13 +39,13 @@ class BookmarkManager(private val project: Project) {
     private var loaded = false
     private val loadLock = Any()
 
-    // 所有收藏列表（按ID索引）
+    // 所有收藏（按ID索引）
     private val bookmarks: MutableMap<String, Bookmark> = ConcurrentHashMap()
 
     // 匿名收藏列表
     private val anonymousBookmarks: MutableList<Bookmark> = Collections.synchronizedList(mutableListOf())
 
-    // 助记符收藏映射（助记符 -> 收藏ID）
+    // 助记符收藏映射（助记符 -> 收藏ID，跨列表全局唯一）
     private val mnemonicMap: MutableMap<Char, String> = ConcurrentHashMap()
 
     // 文件收藏列表（文件路径 -> 收藏ID列表）
@@ -52,6 +57,9 @@ class BookmarkManager(private val project: Project) {
     // 行收藏索引（文件路径 -> 行号 -> 收藏ID列表），用于提升 gutter 查询性能
     private val lineBookmarks: MutableMap<String, MutableMap<Int, MutableList<String>>> = ConcurrentHashMap()
 
+    // 收藏列表元信息（始终包含默认列表；sortType 按列表记忆并持久化）
+    private val lists: MutableList<ListInfo> = Collections.synchronizedList(mutableListOf(ListInfo(Bookmark.DEFAULT_LIST_NAME)))
+
     private fun ensureLoaded() {
         if (loaded) return
         synchronized(loadLock) {
@@ -61,6 +69,8 @@ class BookmarkManager(private val project: Project) {
         }
     }
 
+    // ==================== 收藏基础操作（行为与列表模型下保持不变） ====================
+
     /**
      * 添加收藏
      *
@@ -69,7 +79,7 @@ class BookmarkManager(private val project: Project) {
      */
     fun addBookmark(bookmark: Bookmark): Boolean {
         ensureLoaded()
-        // 检查助记符冲突
+        // 检查助记符冲突（跨列表全局唯一）
         if (bookmark.mnemonic != null) {
             if (mnemonicMap.containsKey(bookmark.mnemonic)) {
                 return false
@@ -122,7 +132,7 @@ class BookmarkManager(private val project: Project) {
     }
 
     /**
-     * 通过助记符获取收藏
+     * 通过助记符获取收藏（跨列表查找）
      *
      * @param mnemonic 助记符
      * @return 收藏项，如果不存在返回null
@@ -244,7 +254,7 @@ class BookmarkManager(private val project: Project) {
 
         // 更新列表中的引用
         if (bookmark.isAnonymous()) {
-            val index = anonymousBookmarks.indexOf(bookmark)
+            val index = anonymousBookmarks.indexOfFirst { it.id == bookmark.id }
             if (index >= 0) {
                 anonymousBookmarks[index] = updatedBookmark
             }
@@ -253,6 +263,26 @@ class BookmarkManager(private val project: Project) {
         // 保存到持久化存储
         saveToStorage()
 
+        return true
+    }
+
+    /**
+     * 更新收藏的助记符与描述（用于工具窗口"设置助记符"）
+     *
+     * @param bookmarkId 收藏ID
+     * @param mnemonic 新助记符（null 表示移除助记符）
+     * @param description 新描述
+     * @return 是否更新成功（目标助记符已被其它收藏占用时返回false）
+     */
+    fun updateBookmarkDetails(bookmarkId: String, mnemonic: Char?, description: String?): Boolean {
+        ensureLoaded()
+        val bookmark = bookmarks[bookmarkId] ?: return false
+        if (mnemonic != null && !Bookmark.isValidMnemonic(mnemonic)) return false
+        if (mnemonic != null && mnemonic != bookmark.mnemonic && mnemonicMap.containsKey(mnemonic)) return false
+
+        val updated = bookmark.copy(mnemonic = mnemonic, description = description)
+        replaceBookmarkInternal(bookmark, updated)
+        saveToStorage()
         return true
     }
 
@@ -335,6 +365,10 @@ class BookmarkManager(private val project: Project) {
         fileBookmarks.clear()
         folderBookmarks.clear()
         lineBookmarks.clear()
+        synchronized(lists) {
+            lists.clear()
+            lists.add(ListInfo(Bookmark.DEFAULT_LIST_NAME))
+        }
     }
 
     /**
@@ -352,27 +386,203 @@ class BookmarkManager(private val project: Project) {
      */
     fun getMnemonicCount(): Int = mnemonicMap.size
 
+    // ==================== 收藏列表（List）管理 ====================
+
     /**
-     * 从持久化存储加载收藏
+     * 获取所有列表元信息（始终包含默认列表，默认列表排在首位）
+     */
+    fun getLists(): List<ListInfo> {
+        ensureLoaded()
+        synchronized(lists) {
+            ensureDefaultListLocked()
+            return lists.toList()
+        }
+    }
+
+    /**
+     * 判断列表是否存在
+     */
+    fun hasList(name: String): Boolean {
+        ensureLoaded()
+        synchronized(lists) {
+            return lists.any { it.name == name }
+        }
+    }
+
+    /**
+     * 新建列表
+     *
+     * @param name 列表名称（去空格后不能为空，且不能与现有列表重名）
+     * @return 是否创建成功
+     */
+    fun createList(name: String): Boolean {
+        ensureLoaded()
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return false
+        synchronized(lists) {
+            if (lists.any { it.name == trimmed }) return false
+            lists.add(ListInfo(trimmed))
+        }
+        saveToStorage()
+        return true
+    }
+
+    /**
+     * 重命名列表（默认列表不可重命名；其下所有收藏同步迁移）
+     *
+     * @return 是否重命名成功
+     */
+    fun renameList(oldName: String, newName: String): Boolean {
+        ensureLoaded()
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return false
+        if (oldName == Bookmark.DEFAULT_LIST_NAME) return false
+        if (oldName == trimmed) return false
+        synchronized(lists) {
+            val index = lists.indexOfFirst { it.name == oldName }
+            if (index < 0) return false
+            if (lists.any { it.name == trimmed }) return false
+            lists[index] = lists[index].copy(name = trimmed)
+        }
+        bookmarks.values.filter { it.listName == oldName }.forEach { bm ->
+            replaceBookmarkInternal(bm, bm.copy(listName = trimmed))
+        }
+        saveToStorage()
+        return true
+    }
+
+    /**
+     * 删除列表（默认列表不可删除；其收藏全部并入默认列表）
+     *
+     * @return 是否删除成功
+     */
+    fun deleteList(name: String): Boolean {
+        ensureLoaded()
+        if (name == Bookmark.DEFAULT_LIST_NAME) return false
+        synchronized(lists) {
+            val index = lists.indexOfFirst { it.name == name }
+            if (index < 0) return false
+            lists.removeAt(index)
+        }
+        bookmarks.values.filter { it.listName == name }.forEach { bm ->
+            replaceBookmarkInternal(bm, bm.copy(listName = Bookmark.DEFAULT_LIST_NAME))
+        }
+        synchronized(lists) {
+            ensureDefaultListLocked()
+        }
+        saveToStorage()
+        return true
+    }
+
+    /**
+     * 将收藏移动到指定列表
+     *
+     * @param bookmarkId 收藏ID
+     * @param listName 目标列表名（必须已存在）
+     * @return 是否移动成功
+     */
+    fun moveToList(bookmarkId: String, listName: String): Boolean {
+        ensureLoaded()
+        if (!hasList(listName)) return false
+        val bookmark = bookmarks[bookmarkId] ?: return false
+        if (bookmark.listName == listName) return true
+        replaceBookmarkInternal(bookmark, bookmark.copy(listName = listName))
+        saveToStorage()
+        return true
+    }
+
+    /**
+     * 设置列表的排序方式（按列表记忆并持久化）
+     *
+     * @return 是否发生变化
+     */
+    fun setSortType(listName: String, sortType: SortType): Boolean {
+        ensureLoaded()
+        var changed = false
+        synchronized(lists) {
+            ensureDefaultListLocked()
+            val index = lists.indexOfFirst { it.name == listName }
+            if (index >= 0 && lists[index].sortType != sortType) {
+                lists[index] = lists[index].copy(sortType = sortType)
+                changed = true
+            }
+        }
+        if (changed) {
+            saveToStorage()
+        }
+        return changed
+    }
+
+    /**
+     * 获取指定列表的排序方式（列表不存在时返回默认值 ADDED）
+     */
+    fun getSortType(listName: String): SortType {
+        ensureLoaded()
+        synchronized(lists) {
+            return lists.firstOrNull { it.name == listName }?.sortType ?: SortType.ADDED
+        }
+    }
+
+    /**
+     * 获取指定列表下的所有收藏（按该列表的排序方式排序）
+     */
+    fun getBookmarksByList(listName: String): List<Bookmark> {
+        ensureLoaded()
+        val sortType = getSortType(listName)
+        return sortBookmarks(bookmarks.values.filter { it.listName == listName }, sortType)
+    }
+
+    private fun sortBookmarks(bookmarksToSort: Collection<Bookmark>, sortType: SortType): List<Bookmark> =
+        when (sortType) {
+            SortType.ADDED -> bookmarksToSort.sortedBy { it.createdTime }
+            SortType.DESCRIPTION -> bookmarksToSort.sortedWith(
+                compareBy({ (it.description ?: "").lowercase(Locale.ROOT) }, { it.createdTime })
+            )
+            SortType.LOCATION -> bookmarksToSort.sortedWith(
+                compareBy({ it.filePath }, { it.lineNumber })
+            )
+        }
+
+    // ==================== 持久化 ====================
+
+    /**
+     * 从持久化存储加载收藏（旧数据无 listName 时自动归入默认列表）
      */
     private fun loadFromStorage() {
         val helper = getStorageHelper()
-        val (anonymousList, mnemonicMap) = helper.loadBookmarks()
+        val (loadedBookmarks, loadedLists) = helper.loadAll()
 
         // 清空现有数据
         clearAll()
 
-        // 加载匿名收藏
-        anonymousList.forEach { bookmark ->
-            bookmarks[bookmark.id] = bookmark
-            indexBookmark(bookmark)
+        // 恢复列表元信息（缺失时兜底默认列表）
+        synchronized(lists) {
+            loadedLists.forEach { info ->
+                if (info.name.isNotBlank() && lists.none { it.name == info.name }) {
+                    lists.add(info)
+                }
+            }
+            ensureDefaultListLocked()
         }
 
-        // 加载助记符收藏
-        mnemonicMap.forEach { (mnemonic, bookmark) ->
-            bookmarks[bookmark.id] = bookmark
-            this.mnemonicMap[mnemonic] = bookmark.id
-            indexBookmark(bookmark)
+        loadedBookmarks.forEach { bookmark ->
+            // 旧数据/空列表名迁移到默认列表
+            val listName = bookmark.listName.trim().ifEmpty { Bookmark.DEFAULT_LIST_NAME }
+            val fixed = if (listName == bookmark.listName) bookmark else bookmark.copy(listName = listName)
+
+            // 自愈：收藏归属了不存在的列表时自动补建元信息，绝不丢数据
+            synchronized(lists) {
+                if (lists.none { it.name == listName }) {
+                    lists.add(ListInfo(listName))
+                }
+            }
+
+            bookmarks[fixed.id] = fixed
+            val mnemonic = fixed.mnemonic
+            if (mnemonic != null && Bookmark.isValidMnemonic(mnemonic) && !mnemonicMap.containsKey(mnemonic)) {
+                mnemonicMap[mnemonic] = fixed.id
+            }
+            indexBookmark(fixed)
         }
     }
 
@@ -380,10 +590,9 @@ class BookmarkManager(private val project: Project) {
      * 保存收藏到持久化存储
      */
     private fun saveToStorage() {
-        val anonymousList = anonymousBookmarks.toList()
-        val mnemonicMap = mnemonicMap.mapValues { bookmarks[it.value]!! }
-            .filterKeys { it in '0'..'9' || it in 'A'..'Z' }
-        getStorageHelper().saveBookmarks(anonymousList, mnemonicMap)
+        val snapshot = bookmarks.values.toList()
+        val listsSnapshot = synchronized(lists) { lists.toList() }
+        getStorageHelper().saveAll(snapshot, listsSnapshot)
     }
 
     private fun indexBookmark(bookmark: Bookmark) {
@@ -436,11 +645,20 @@ class BookmarkManager(private val project: Project) {
         indexBookmark(newBookmark)
     }
 
-        private fun removeBookmarkInternal(bookmarkId: String): Boolean {
+    private fun removeBookmarkInternal(bookmarkId: String): Boolean {
         val bookmark = bookmarks.remove(bookmarkId) ?: return false
         bookmark.mnemonic?.let { mnemonicMap.remove(it) }
         unindexBookmark(bookmark)
         return true
+    }
+
+    /**
+     * 确保默认列表存在（调用方需持有 lists 锁）
+     */
+    private fun ensureDefaultListLocked() {
+        if (lists.none { it.name == Bookmark.DEFAULT_LIST_NAME }) {
+            lists.add(0, ListInfo(Bookmark.DEFAULT_LIST_NAME))
+        }
     }
 
     /**
