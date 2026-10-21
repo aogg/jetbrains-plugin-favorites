@@ -178,7 +178,8 @@ object NativeBookmarkXmlParser {
     fun parseMnemonic(raw: String?): Char? {
         val trimmed = raw?.trim() ?: return null
         if (trimmed.length != 1) return null
-        val ch = trimmed.uppercaseChar()
+        // String 没有 uppercaseChar()（仅 Char 有），取首字符（上方已保证长度为 1）转大写
+        val ch = trimmed[0].uppercaseChar()
         return ch.takeIf { it in '0'..'9' || it in 'A'..'Z' }
     }
 
@@ -198,13 +199,14 @@ object NativeBookmarkXmlParser {
      * 最近 GroupState 祖先的 name option 值（新格式的列表名）
      */
     private fun nearestGroupName(element: Element): String? {
-        var parent: Element? = element.parent
+        // org.jdom Content.getParent() 返回 Parent（可能是 Document），祖先遍历只关心 Element
+        var parent: Element? = element.parent as? Element
         while (parent != null) {
             if (parent.name == GROUP_TAG) {
                 return childOptionValue(parent, "name")
                     ?: parent.getAttributeValue("name")?.trim()?.takeIf { it.isNotEmpty() }
             }
-            parent = parent.parent
+            parent = parent.parent as? Element
         }
         return null
     }
@@ -213,11 +215,12 @@ object NativeBookmarkXmlParser {
      * 最近祖先元素上指定属性名的值（旧收藏列表的 list/listName 归属）
      */
     private fun ancestorAttributeValue(element: Element, attributeName: String): String? {
-        var parent: Element? = element.parent
+        // org.jdom Content.getParent() 返回 Parent（可能是 Document），祖先遍历只关心 Element
+        var parent: Element? = element.parent as? Element
         while (parent != null) {
             val value = parent.getAttributeValue(attributeName)
             if (!value.isNullOrBlank()) return value
-            parent = parent.parent
+            parent = parent.parent as? Element
         }
         return null
     }
@@ -226,11 +229,12 @@ object NativeBookmarkXmlParser {
      * 最近祖先元素 name 属性值（旧收藏列表的列表名兜底）
      */
     private fun nearestAncestorName(element: Element): String? {
-        var parent: Element? = element.parent
+        // org.jdom Content.getParent() 返回 Parent（可能是 Document），祖先遍历只关心 Element
+        var parent: Element? = element.parent as? Element
         while (parent != null) {
             val name = parent.getAttributeValue("name")
             if (!name.isNullOrBlank() && parent.name != "component") return name
-            parent = parent.parent
+            parent = parent.parent as? Element
         }
         return null
     }
