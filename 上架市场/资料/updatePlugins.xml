@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  自托管更新通道模板：用户不通过 JetBrains Marketplace 时，可用自己的服务器分发更新。
+
+  用法：
+  1. 把本 xml 和插件 zip 放到自己服务器（保证 zip 的 url 可直接下载）。
+  2. IDE 中 Settings → Plugins → ⚙ → Manage Plugin Repositories（管理插件仓库），
+     填入本 xml 的地址，即可检查更新。
+  3. 发新版本时必须更新本文件：version 和 url（url 里的 zip 文件名要与新版本产物一致）。
+
+  下面 url 指向 GitHub latest Release 的 zip（当前 1.0.12 的发布产物名）。
+-->
+<plugins>
+    <plugin id="com.aogg.favorites" name="Favorites" version="1.0.12" vendor="aogg">
+        <idea-version since-build="233" until-build="262.*"/>
+        <url>https://github.com/aogg/jetbrains-plugin-favorites/releases/latest/download/jetbrains-plugin-favorites-1.0.12.zip</url>
+    </plugin>
+</plugins>
