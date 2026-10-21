@@ -11,9 +11,9 @@ import com.intellij.util.xmlb.XmlSerializerUtil
 /**
  * 项目级"原生书签导入"状态（持久化）
  *
- * 阶段说明：本阶段只建好持久化字段，阶段 B（原生书签导入/首次引导通知）使用：
- * - importedNative：本项目是否已完成原生书签导入
+ * - importedNative：本项目是否已完成原生书签导入（导入动作/首次引导"立即导入"成功后置位）
  * - dontAskAgain：首次引导是否选择"不再提示"
+ * - 可在 Settings → Tools → Favorites 的"重置导入提示"按钮清空（重新触发首次引导检测）
  */
 @State(
     name = "FavoritesProjectImportState",

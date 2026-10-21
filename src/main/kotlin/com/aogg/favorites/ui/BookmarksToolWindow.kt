@@ -140,6 +140,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             .setRemoveActionName("删除收藏")
             .setRemoveAction { deleteSelectedNodes() }
             .addExtraAction(AddMnemonicFromToolWindowAction())
+            .addExtraAction(ImportNativeBookmarksFromToolWindowAction())
             .addExtraAction(ExpandAllAction())
             .addExtraAction(CollapseAllAction())
         add(decorator.createPanel(), BorderLayout.CENTER)
@@ -380,6 +381,16 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         AnAction("添加助记符收藏", "在当前位置添加/移除助记符收藏", AllIcons.Gutter.Bookmark) {
         override fun actionPerformed(e: AnActionEvent) {
             invokeGlobalAction("Favorites.AddMnemonicBookmark")
+        }
+    }
+
+    /**
+     * 导入原生书签（转发到 Favorites.ImportNativeBookmarks 动作）
+     */
+    private inner class ImportNativeBookmarksFromToolWindowAction :
+        AnAction("导入原生书签", "导入 PhpStorm 原生书签到收藏列表", AllIcons.ToolbarDecorator.Import) {
+        override fun actionPerformed(e: AnActionEvent) {
+            invokeGlobalAction("Favorites.ImportNativeBookmarks")
         }
     }
 

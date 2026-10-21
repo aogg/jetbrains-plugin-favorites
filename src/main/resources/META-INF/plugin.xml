@@ -12,9 +12,27 @@
     - 助记符收藏：使用数字（0-9）或字母（A-Z）作为标识符，最多36个，项目内全局唯一
     - 收藏管理工具窗口：列表/收藏两级树、实时过滤、排序、快速跳转
     - 快速访问：弹出窗口快速跳转到收藏位置
+    - 导入原生书签：一键导入 PhpStorm 原生书签（运行时 API + .idea XML 容错解析，自动去重与增量合并）
+    - 隐藏原生书签入口：默认接管 F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 并隐藏原生 Bookmarks 工具窗口，可在设置中关闭
     ]]></description>
 
     <change-notes><![CDATA[
+    1.1.0 - 原生书签导入与隐藏原生入口
+    - 新增"导入原生书签"：双通道读取 PhpStorm 原生书签（首选运行时 BookmarksManager API，
+      兜底容错解析 .idea/bookmarks.xml / workspace.xml 与旧版收藏列表）
+    - 导入规则：行号→行收藏，文件/文件夹→对应收藏；原生列表同名创建，无列表进"原生书签"列表；
+      助记符带过来（已被占用降级为匿名收藏）；按（相对路径+行号）/路径去重，可重复执行增量合并
+    - 导入完成通知：已导入 N 条（新建 M 个列表，跳过重复 K 条），支持[查看]打开收藏工具窗口
+    - 首次引导：检测到原生书签且未导入过时弹 BALLOON 通知，动作[立即导入][不再提示]
+    - 隐藏原生书签入口（默认开启，可在 Settings → Tools → Favorites 关闭）：
+      通过 ActionConfigurationCustomizer + replaceAction 接管原生动作 id（键位映射保留）：
+      ToggleBookmark→匿名收藏、ToggleBookmarkWithMnemonic→助记符收藏、ShowBookmarks→收藏弹出列表、
+      ActivateBookmarksToolWindow→收藏工具窗口、GotoBookmark0-9（及 A-Z 存在时）→对应助记符跳转；
+      残余原生动作（ToggleBookmark0-9/A-Z、ShowTypeBookmarks）与原生 Bookmarks 动作组整体隐藏；
+      原生 Bookmarks 工具窗口 setAvailable(false) 隐藏并注册监听兜底
+    - 关闭"隐藏原生"开关时：按记录恢复原生动作实例与工具窗口可见性
+    - 设置页新增"重置导入提示"按钮；新增通知组 Favorites.Notifications
+
     1.1.0 - 阶段A：入口修复与收藏列表重构
     - 修复安装后无任何操作入口的问题：全部 action 从 extensions 移入 actions 段
     - 新增"收藏"右键子菜单（编辑器/行号区/项目视图/编辑器标签页，均置底显示）
@@ -87,10 +105,18 @@
 
     <!-- 依赖 -->
     <depends>com.intellij.modules.platform</depends>
+    <!-- 原生书签 API（com.intellij.ide.bookmark.*）位于 lang 模块；PhpStorm/IDEA 均内置 -->
+    <depends>com.intellij.modules.lang</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <!-- 插件启动活动 -->
         <postStartupActivity implementation="com.aogg.favorites.FavoritesPlugin"/>
+
+        <!-- 通知组（BALLOON）：导入完成通知与首次引导 -->
+        <notificationGroup id="Favorites.Notifications" displayType="BALLOON"/>
+
+        <!-- 动作管理器初始化时接管/隐藏原生书签动作（读取 FavoritesSettings.hideNativeBookmarks，默认开启） -->
+        <actionConfigurationCustomizer implementation="com.aogg.favorites.nativebookmarks.NativeBookmarkActionCustomizer"/>
 
         <!-- 工具窗口（贴近 PhpStorm Bookmarks 习惯，停靠在左侧） -->
         <toolWindow id="Favorites" anchor="left" factoryClass="com.aogg.favorites.ui.BookmarksToolWindowFactory" icon="AllIcons.Gutter.Bookmark"/>
@@ -119,6 +145,10 @@
                     text="添加助记符收藏" description="添加/移除助记符收藏">
                 <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
             </action>
+
+            <!-- 导入原生书签（阶段B） -->
+            <action id="Favorites.ImportNativeBookmarks" class="com.aogg.favorites.nativebookmarks.ImportNativeBookmarksAction"
+                    text="导入原生书签" description="导入 PhpStorm 原生书签到收藏列表（自动去重，可重复执行）"/>
         </group>
 
         <!-- 全局动作 -->

@@ -10,8 +10,10 @@ import com.intellij.util.xmlb.XmlSerializerUtil
 /**
  * Favorites 应用级设置（持久化）
  *
- * 阶段说明：hideNativeBookmarks 本阶段只做 UI 与持久化，
- * 真正隐藏原生书签入口（ActionManager.replaceAction 等）在原生集成版本实现。
+ * hideNativeBookmarks 默认开启：
+ * - 开启时由 NativeBookmarkActionCustomizer（actionConfigurationCustomizer EP）接管原生书签动作，
+ *   并在项目打开后隐藏原生 Bookmarks 工具窗口；
+ * - apply 变化时由 FavoritesNativeIntegration.applyOrRestore() 立即生效/恢复。
  */
 @State(
     name = "FavoritesSettings",
