@@ -21,7 +21,7 @@ import com.intellij.util.xmlb.XmlSerializerUtil
     storages = [Storage(value = "favorites.xml", roamingType = RoamingType.DISABLED)]
 )
 @Service(Service.Level.PROJECT)
-class BookmarkStorageHelper : PersistentStateComponent<BookmarkStorageHelper.State> {
+class BookmarkStorageHelper : PersistentStateComponent<BookmarkStorageHelper.State>, BookmarkPersistence {
 
     data class State(
         var anonymousBookmarks: MutableList<BookmarkData> = mutableListOf(),
@@ -111,31 +111,18 @@ class BookmarkStorageHelper : PersistentStateComponent<BookmarkStorageHelper.Sta
     }
 
     /**
-     * 保存所有收藏与列表元信息
+     * 保存所有收藏与列表元信息（委托共享静态实现，全局存储助手复用同一份逻辑）
      */
-    fun saveAll(bookmarks: List<Bookmark>, lists: List<ListInfo>) {
-        state.anonymousBookmarks = bookmarks.filter { it.isAnonymous() }
-            .map { BookmarkData.fromBookmark(it) }
-            .toMutableList()
-        state.mnemonicBookmarks = bookmarks.filter { it.isMnemonic() && it.mnemonic != null && Bookmark.isValidMnemonic(it.mnemonic!!) }
-            .associateBy({ it.mnemonic!!.toString() }, { BookmarkData.fromBookmark(it) })
-            .toMutableMap()
-        state.lists = lists.map { ListData.fromListInfo(it) }.toMutableList()
+    override fun saveAll(bookmarks: List<Bookmark>, lists: List<ListInfo>) {
+        writeToState(state, bookmarks, lists)
     }
 
     /**
-     * 加载所有收藏与列表元信息
+     * 加载所有收藏与列表元信息（委托共享静态实现）
      *
      * @return Pair(全部收藏, 列表元信息)
      */
-    fun loadAll(): Pair<List<Bookmark>, List<ListInfo>> {
-        val anonymous = state.anonymousBookmarks.map { it.toBookmark() }
-        val mnemonic = state.mnemonicBookmarks.values
-            .filter { (it.mnemonic?.singleOrNull())?.let { c -> Bookmark.isValidMnemonic(c) } == true }
-            .map { it.toBookmark() }
-        val lists = state.lists.map { it.toListInfo() }
-        return Pair(anonymous + mnemonic, lists)
-    }
+    override fun loadAll(): Pair<List<Bookmark>, List<ListInfo>> = readFromState(state)
 
     /**
      * 清空所有收藏
@@ -153,6 +140,39 @@ class BookmarkStorageHelper : PersistentStateComponent<BookmarkStorageHelper.Sta
         @JvmStatic
         fun getInstance(project: com.intellij.openapi.project.Project): BookmarkStorageHelper {
             return project.service()
+        }
+
+        /**
+         * 将收藏与列表元信息全量写入指定 State（项目/全局两个存储助手共用，避免逻辑复制）
+         *
+         * @param state 目标 State（原地覆盖）
+         * @param bookmarks 全部收藏（匿名入列表、合法助记符入映射）
+         * @param lists 列表元信息
+         */
+        @JvmStatic
+        fun writeToState(state: State, bookmarks: List<Bookmark>, lists: List<ListInfo>) {
+            state.anonymousBookmarks = bookmarks.filter { it.isAnonymous() }
+                .map { BookmarkData.fromBookmark(it) }
+                .toMutableList()
+            state.mnemonicBookmarks = bookmarks.filter { it.isMnemonic() && it.mnemonic != null && Bookmark.isValidMnemonic(it.mnemonic!!) }
+                .associateBy({ it.mnemonic!!.toString() }, { BookmarkData.fromBookmark(it) })
+                .toMutableMap()
+            state.lists = lists.map { ListData.fromListInfo(it) }.toMutableList()
+        }
+
+        /**
+         * 从指定 State 读取全部收藏与列表元信息（项目/全局两个存储助手共用）
+         *
+         * @return Pair(全部收藏, 列表元信息)
+         */
+        @JvmStatic
+        fun readFromState(state: State): Pair<List<Bookmark>, List<ListInfo>> {
+            val anonymous = state.anonymousBookmarks.map { it.toBookmark() }
+            val mnemonic = state.mnemonicBookmarks.values
+                .filter { (it.mnemonic?.singleOrNull())?.let { c -> Bookmark.isValidMnemonic(c) } == true }
+                .map { it.toBookmark() }
+            val lists = state.lists.map { it.toListInfo() }
+            return Pair(anonymous + mnemonic, lists)
         }
     }
 }

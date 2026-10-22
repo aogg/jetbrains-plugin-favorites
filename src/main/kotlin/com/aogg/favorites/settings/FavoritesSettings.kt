@@ -30,6 +30,13 @@ class FavoritesSettings : PersistentStateComponent<FavoritesSettings.State> {
          * 是否隐藏 PhpStorm 原生书签入口（默认开启）
          */
         var hideNativeBookmarks: Boolean = true
+
+        /**
+         * 添加收藏时上次选择的作用域（1.2.0 新增）：
+         * 存 FavoriteScope 枚举名（PROJECT/GLOBAL），默认 PROJECT；
+         * 弹出"项目收藏/全局收藏"二选一时默认高亮该作用域，选择后记住
+         */
+        var lastAddScope: String = "PROJECT"
     }
 
     private var state = State()
@@ -40,6 +47,19 @@ class FavoritesSettings : PersistentStateComponent<FavoritesSettings.State> {
 
     override fun loadState(state: State) {
         XmlSerializerUtil.copyBean(state, this.state)
+    }
+
+    /**
+     * 获取上次添加收藏时选择的作用域（异常值保守回退 PROJECT）
+     */
+    fun getLastAddScope(): com.aogg.favorites.model.FavoriteScope =
+        com.aogg.favorites.model.FavoriteScope.fromNameOrDefault(state.lastAddScope)
+
+    /**
+     * 记住本次添加收藏选择的作用域（下次弹出选择时默认高亮）
+     */
+    fun setLastAddScope(scope: com.aogg.favorites.model.FavoriteScope) {
+        state.lastAddScope = scope.name
     }
 
     companion object {

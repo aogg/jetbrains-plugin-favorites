@@ -248,7 +248,7 @@ object NativeBookmarkXmlParser {
             ?.getAttributeValue("value")
 
     /**
-     * 遍历包括根在内的所有后代元素
+     * 遍历包括根在内的所有后代元素（按文档序：父先于子、兄先于弟）
      */
     private fun allDescendants(root: Element): List<Element> {
         val result = ArrayList<Element>()
@@ -257,7 +257,9 @@ object NativeBookmarkXmlParser {
         while (stack.isNotEmpty()) {
             val current = stack.removeLast()
             result += current
-            for (child in current.children) stack.addLast(child)
+            // LIFO 栈需逆序压栈才能保证兄弟按文档序弹出
+            // （正序压栈会倒序解析同级 Bookmark，导致导入顺序颠倒，随单测修复）
+            for (child in current.children.asReversed()) stack.addLast(child)
         }
         return result
     }
