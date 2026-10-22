@@ -156,7 +156,7 @@ src/
 1. 在 IntelliJ IDEA 中打开项目
 2. IDE 会自动下载 Gradle wrapper
 3. 在 Gradle 工具窗口中运行 `buildPlugin` 任务
-4. 插件包将生成在 `build/distributions/` 目录
+4. 插件包将生成在 `build/distributions/` 目录，并自动同步复制到项目根 `distributions/` 目录
 
 ### 方式二：使用命令行
 
@@ -168,9 +168,28 @@ gradlew.bat buildPlugin
 ./gradlew buildPlugin
 ```
 
+### 方式三：使用便捷打包脚本 bin/build.sh（推荐）
+
+脚本自动定位 JDK17（JAVA_HOME → PATH → /usr/lib/jvm/java-17*）并执行 Gradle 打包：
+
+```bash
+# 默认执行 buildPlugin
+bash bin/build.sh
+
+# 先跑单元测试再打包
+bash bin/build.sh --test
+
+# 打包前先 clean；其余参数原样透传给 gradlew
+bash bin/build.sh --clean
+bash bin/build.sh --clean --test
+bash bin/build.sh --clean buildPlugin --console=plain
+```
+
+构建成功后打印插件 zip 的绝对路径、大小与 sha256。zip 会同步输出到项目根 `distributions/` 目录（`build/distributions/` 仍是 Gradle 原始输出位置，CI 发布继续使用它）。
+
 ## 安装插件
 
-1. 构建完成后，在 `build/distributions/` 目录找到生成的 zip 文件
+1. 构建完成后，在项目根 `distributions/`（或 `build/distributions/`）目录找到生成的 zip 文件
 2. 在 PhpStorm 中：`File` -> `Settings` -> `Plugins` -> `Install Plugin from Disk`
 3. 选择生成的 zip 文件进行安装
 4. 重启 PhpStorm

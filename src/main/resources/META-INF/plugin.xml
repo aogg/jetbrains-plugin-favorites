@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.1.0</version>
+    <version>1.1.1</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -17,6 +17,11 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.1.1 - 构建脚本
+    - 新增 bin/build.sh 便捷打包脚本：自动定位 JDK17，支持 --test/--clean 与参数透传给 gradlew，
+      构建成功后打印插件 zip 的绝对路径、大小与 sha256
+    - buildPlugin 产物同步输出到项目根 distributions/（build/distributions/ 保留不变）
+
     1.1.0 - 原生书签导入与隐藏原生入口
     - 新增"导入原生书签"：双通道读取 PhpStorm 原生书签（首选运行时 BookmarksManager API，
       兜底容错解析 .idea/bookmarks.xml / workspace.xml 与旧版收藏列表）

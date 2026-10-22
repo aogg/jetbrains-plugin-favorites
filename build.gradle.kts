@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.aogg"
-version = "1.1.0"
+version = "1.1.1"
 
 repositories {
     mavenCentral()
@@ -39,6 +39,19 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
+    }
+
+    // 打包产物同步复制到项目根目录 distributions/（目录不存在自动创建，zip 文件名跟随项目 version）
+    val copyPluginZipToDistributions = register<Copy>("copyPluginZipToDistributions") {
+        group = "build"
+        description = "复制 buildPlugin 产出的插件 zip 到项目根目录 distributions/"
+        from(buildPlugin) {
+            include("*.zip")
+        }
+        into(layout.projectDirectory.dir("distributions"))
+    }
+    buildPlugin {
+        finalizedBy(copyPluginZipToDistributions)
     }
 }
 
