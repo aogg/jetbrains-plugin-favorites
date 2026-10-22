@@ -2,8 +2,9 @@ package com.aogg.favorites.action
 
 import com.aogg.favorites.helper.BookmarkRefreshHelper
 import com.aogg.favorites.model.Bookmark
-import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
+import com.aogg.favorites.model.FavoriteScope
+import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.ui.MnemonicSelectorDialog
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -18,31 +19,36 @@ import java.util.*
 /**
  * 添加助记符收藏动作
  * 弹出助记符选择对话框，处理标识符冲突
+ *
+ * 1.2.0 双作用域语义：
+ * - 先弹「项目收藏/全局收藏」二选一（默认高亮上次使用的作用域，选择后记住）；
+ * - 再打开 MnemonicSelectorDialog（标题/提示带作用域名，占用检测按该作用域）；
+ * - 同一位置的旧助记符收藏（两个作用域都查）在新增时被替换，维持"重新设置助记符"语义；
+ * - 加入 GLOBAL 时写入绝对路径；项目外位置只能加入 GLOBAL。
  */
 class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助记符收藏", null) {
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        val bookmarkManager = BookmarkManager.getInstance(project)
 
         // 尝试从编辑器获取位置
         val editor = e.getData(CommonDataKeys.EDITOR)
         if (editor != null) {
-            handleEditorContext(project, bookmarkManager, editor)
+            handleEditorContext(project, editor)
             return
         }
 
         // 尝试从项目窗口获取文件/文件夹
         val virtualFiles = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)
         if (virtualFiles != null && virtualFiles.isNotEmpty()) {
-            handleProjectContext(project, bookmarkManager, virtualFiles)
+            handleProjectContext(project, virtualFiles)
             return
         }
 
         // 尝试从标签页右键菜单获取文件（EditorTabPopupMenu）
         val virtualFile = e.getData(CommonDataKeys.VIRTUAL_FILE)
         if (virtualFile != null) {
-            handleFileContext(project, bookmarkManager, virtualFile, editor)
+            handleFileContext(project, virtualFile, editor)
             return
         }
 
@@ -50,7 +56,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         val fileEditorManager = FileEditorManager.getInstance(project)
         val selectedFiles = fileEditorManager.selectedFiles
         if (selectedFiles.isNotEmpty()) {
-            handleFileContext(project, bookmarkManager, selectedFiles[0], editor)
+            handleFileContext(project, selectedFiles[0], editor)
             return
         }
 
@@ -64,78 +70,24 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
     /**
      * 处理编辑器上下文（代码行收藏）
      */
-    private fun handleEditorContext(
-        project: Project,
-        bookmarkManager: BookmarkManager,
-        editor: Editor
-    ) {
+    private fun handleEditorContext(project: Project, editor: Editor) {
         val document = editor.document
-        val caretModel = editor.caretModel
-        val currentOffset = caretModel.offset
+        val currentOffset = editor.caretModel.offset
         val lineNumber = document.getLineNumber(currentOffset)
 
         val virtualFile = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance()
             .getFile(document) ?: return
 
-        val filePath = getRelativeFilePath(project, virtualFile.path) ?: return
-
-        // 检查是否已存在该行的助记符收藏
-        val existingBookmark = bookmarkManager.getAllBookmarks()
-            .firstOrNull { it.type == BookmarkType.LINE && it.filePath == filePath && it.lineNumber == lineNumber && it.isMnemonic() }
-
-        // 显示助记符选择对话框
-        val dialog = MnemonicSelectorDialog(project, existingBookmark?.mnemonic)
-        if (dialog.showAndGet()) {
-            val selectedMnemonic = dialog.selectedMnemonic ?: return
-
-            // 如果已存在该助记符的收藏，先移除
-            val existingMnemonicBookmark = bookmarkManager.getBookmarkByMnemonic(selectedMnemonic)
-            if (existingMnemonicBookmark != null) {
-                bookmarkManager.removeBookmark(existingMnemonicBookmark.id)
-            }
-
-            // 如果当前行已有助记符收藏，先移除
-            if (existingBookmark != null) {
-                bookmarkManager.removeBookmark(existingBookmark.id)
-            }
-
-            // 创建新的助记符收藏
-            val bookmark = Bookmark(
-                id = UUID.randomUUID().toString(),
-                type = BookmarkType.LINE,
-                filePath = filePath,
-                lineNumber = lineNumber,
-                mnemonic = selectedMnemonic,
-                description = dialog.description
-            )
-
-            if (bookmarkManager.addBookmark(bookmark)) {
-                val mnemonicText = "[$selectedMnemonic]"
-                val descText = if (dialog.description != null) ": ${dialog.description}" else ""
-                Messages.showInfoMessage(
-                    project,
-                    "已添加助记符收藏 $mnemonicText$descText（行 ${lineNumber + 1}）",
-                    "添加收藏成功"
-                )
-                BookmarkRefreshHelper.refreshAfterChange(project)
-            } else {
-                Messages.showErrorDialog(
-                    project,
-                    "添加收藏失败：助记符冲突",
-                    "添加收藏失败"
-                )
-            }
-        }
+        // 行收藏位置（type 显式覆盖为 LINE）
+        val location = AddActionSupport.locationOf(project, virtualFile, lineNumber)
+            .copy(type = BookmarkType.LINE)
+        processLocation(project, location)
     }
 
     /**
      * 处理项目窗口上下文（文件/文件夹收藏）
      */
-    private fun handleProjectContext(
-        project: Project,
-        bookmarkManager: BookmarkManager,
-        virtualFiles: Array<VirtualFile>
-    ) {
+    private fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>) {
         // 助记符收藏每个标识符只能使用一次，所以只处理第一个文件/文件夹
         // 如果选择了多个，提示用户
         if (virtualFiles.size > 1) {
@@ -146,142 +98,114 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
             )
         }
 
-        val virtualFile = virtualFiles[0]
-        val filePath = getRelativeFilePath(project, virtualFile.path) ?: return
-
-        val bookmarkType = if (virtualFile.isDirectory) {
-            BookmarkType.FOLDER
-        } else {
-            BookmarkType.FILE
-        }
-
-        // 检查是否已存在该文件/文件夹的助记符收藏
-        val existingBookmark = bookmarkManager.getAllBookmarks()
-            .firstOrNull { it.type == bookmarkType && it.filePath == filePath && it.isMnemonic() }
-
-        // 显示助记符选择对话框
-        val dialog = MnemonicSelectorDialog(project, existingBookmark?.mnemonic)
-        if (dialog.showAndGet()) {
-            val selectedMnemonic = dialog.selectedMnemonic ?: return
-
-            // 如果已存在该助记符的收藏，先移除
-            val existingMnemonicBookmark = bookmarkManager.getBookmarkByMnemonic(selectedMnemonic)
-            if (existingMnemonicBookmark != null) {
-                bookmarkManager.removeBookmark(existingMnemonicBookmark.id)
-            }
-
-            // 如果当前文件/文件夹已有助记符收藏，先移除
-            if (existingBookmark != null) {
-                bookmarkManager.removeBookmark(existingBookmark.id)
-            }
-
-            // 创建新的助记符收藏
-            val bookmark = Bookmark(
-                id = UUID.randomUUID().toString(),
-                type = bookmarkType,
-                filePath = filePath,
-                lineNumber = -1,
-                mnemonic = selectedMnemonic,
-                description = dialog.description
-            )
-
-            if (bookmarkManager.addBookmark(bookmark)) {
-                val mnemonicText = "[$selectedMnemonic]"
-                val descText = if (dialog.description != null) ": ${dialog.description}" else ""
-                val typeText = if (bookmarkType == BookmarkType.FILE) "文件" else "文件夹"
-                Messages.showInfoMessage(
-                    project,
-                    "已添加助记符收藏 $mnemonicText$descText（$typeText）",
-                    "添加收藏成功"
-                )
-                BookmarkRefreshHelper.refreshAfterChange(project)
-            } else {
-                Messages.showErrorDialog(
-                    project,
-                    "添加收藏失败：助记符冲突",
-                    "添加收藏失败"
-                )
-            }
-        }
+        processLocation(project, AddActionSupport.locationOf(project, virtualFiles[0], -1))
     }
 
     /**
      * 处理文件上下文（标签页收藏）
      */
-    private fun handleFileContext(
-        project: Project,
-        bookmarkManager: BookmarkManager,
-        virtualFile: VirtualFile,
-        editor: Editor?
-    ) {
+    private fun handleFileContext(project: Project, virtualFile: VirtualFile, editor: Editor?) {
         if (editor != null) {
             // 如果有编辑器，收藏当前行
-            handleEditorContext(project, bookmarkManager, editor)
+            handleEditorContext(project, editor)
         } else {
             // 否则收藏文件
-            val filePath = getRelativeFilePath(project, virtualFile.path) ?: return
-
-            val bookmarkType = if (virtualFile.isDirectory) {
-                BookmarkType.FOLDER
-            } else {
-                BookmarkType.FILE
-            }
-
-            val existingBookmark = bookmarkManager.getAllBookmarks()
-                .firstOrNull { it.type == bookmarkType && it.filePath == filePath && it.isMnemonic() }
-
-            val dialog = MnemonicSelectorDialog(project, existingBookmark?.mnemonic)
-            if (dialog.showAndGet()) {
-                val selectedMnemonic = dialog.selectedMnemonic ?: return
-
-                val existingMnemonicBookmark = bookmarkManager.getBookmarkByMnemonic(selectedMnemonic)
-                if (existingMnemonicBookmark != null) {
-                    bookmarkManager.removeBookmark(existingMnemonicBookmark.id)
-                }
-
-                if (existingBookmark != null) {
-                    bookmarkManager.removeBookmark(existingBookmark.id)
-                }
-
-                val bookmark = Bookmark(
-                    id = UUID.randomUUID().toString(),
-                    type = bookmarkType,
-                    filePath = filePath,
-                    lineNumber = -1,
-                    mnemonic = selectedMnemonic,
-                    description = dialog.description
-                )
-
-                if (bookmarkManager.addBookmark(bookmark)) {
-                    val mnemonicText = "[$selectedMnemonic]"
-                    val descText = if (dialog.description != null) ": ${dialog.description}" else ""
-                    Messages.showInfoMessage(
-                        project,
-                        "已添加助记符收藏 $mnemonicText$descText",
-                        "添加收藏成功"
-                    )
-                    BookmarkRefreshHelper.refreshAfterChange(project)
-                } else {
-                    Messages.showErrorDialog(
-                        project,
-                        "添加收藏失败：助记符冲突",
-                        "添加收藏失败"
-                    )
-                }
-            }
+            processLocation(project, AddActionSupport.locationOf(project, virtualFile, -1))
         }
     }
 
     /**
-     * 获取相对文件路径
+     * 统一处理单个目标位置：选作用域 → 助记符对话框 → 替换写入
      */
-    private fun getRelativeFilePath(project: Project, absolutePath: String): String? {
-        val basePath = project.basePath ?: return null
-        return if (absolutePath.startsWith(basePath)) {
-            absolutePath.substring(basePath.length).replace('\\', '/').trimStart('/')
-        } else {
-            null
+    private fun processLocation(project: Project, location: AddActionSupport.PendingLocation) {
+        // ////////////////  准备数据：该位置已有助记符收藏（两作用域，用于预填）  start  ///
+        val existingAtPosition = AddActionSupport.findExisting(project, location) { it.isMnemonic() }
+        val prefillMnemonic = existingAtPosition.firstOrNull()?.bookmark?.mnemonic
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：先选作用域，再开助记符对话框  start  ////////////////
+        AddScopeChooser.chooseScope(project) { scope ->
+            val dialog = MnemonicSelectorDialog(
+                project,
+                scope = scope,
+                currentMnemonic = prefillMnemonic
+            )
+            if (!dialog.showAndGet()) return@chooseScope
+            val selectedMnemonic = dialog.selectedMnemonic ?: return@chooseScope
+            performAdd(project, scope, location, selectedMnemonic, dialog.description, existingAtPosition)
         }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 按所选作用域写入助记符收藏（替换旧助记符/占位符，与历史语义一致）
+     */
+    private fun performAdd(
+        project: Project,
+        scope: FavoriteScope,
+        location: AddActionSupport.PendingLocation,
+        selectedMnemonic: Char,
+        description: String?,
+        existingAtPosition: List<com.aogg.favorites.ui.ScopedBookmark>
+    ) {
+        // ////////////////  校验参数：项目收藏无法保存项目外位置  start  //////////////////
+        val storagePath = AddActionSupport.storagePathFor(scope, location)
+        if (storagePath == null) {
+            Messages.showErrorDialog(
+                project,
+                "该位置在项目目录之外，只能加入「全局收藏」。",
+                "添加收藏失败"
+            )
+            return
+        }
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：清占位（按所选作用域）+ 替换同位置旧助记符  start  ///
+        val manager = FavoritesScopeResolver.managerFor(project, scope)
+        // 该助记符已被其它收藏占用 → 先移除（历史语义：新设置顶替旧收藏）
+        manager.getBookmarkByMnemonic(selectedMnemonic)?.let {
+            manager.removeBookmark(it.id)
+        }
+        // 同一位置的旧助记符收藏（两个作用域都清理，避免跨作用域重复）
+        existingAtPosition.forEach {
+            FavoritesScopeResolver.managerFor(project, it.scope).removeBookmark(it.bookmark.id)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：写入新助记符收藏（GLOBAL=绝对路径）  start  /////////
+        val bookmark = Bookmark(
+            id = UUID.randomUUID().toString(),
+            type = location.type,
+            filePath = storagePath,
+            lineNumber = location.lineNumber,
+            mnemonic = selectedMnemonic,
+            description = description
+        )
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // ////////////////  逻辑后：结果通知与刷新  start  //////////////////////////////
+        if (manager.addBookmark(bookmark)) {
+            val mnemonicText = "[$selectedMnemonic]"
+            val descText = if (description != null) ": $description" else ""
+            val typeText = when (location.type) {
+                BookmarkType.LINE -> "行 ${location.lineNumber + 1}"
+                BookmarkType.FILE -> "文件"
+                BookmarkType.FOLDER -> "文件夹"
+            }
+            Messages.showInfoMessage(
+                project,
+                "已添加助记符收藏 $mnemonicText$descText 到「${scope.label}」（$typeText）",
+                "添加收藏成功"
+            )
+            BookmarkRefreshHelper.refreshAfterChange(project)
+        } else {
+            Messages.showErrorDialog(
+                project,
+                "添加收藏失败：助记符 [$selectedMnemonic] 在「${scope.label}」中已被占用",
+                "添加收藏失败"
+            )
+        }
+        // ////////////////  逻辑后  end  //////////////////////////////////////////////
     }
 
     /**

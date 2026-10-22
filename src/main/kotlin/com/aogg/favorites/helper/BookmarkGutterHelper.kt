@@ -3,6 +3,7 @@ package com.aogg.favorites.helper
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
+import com.aogg.favorites.model.GlobalBookmarkManager
 import com.intellij.codeInsight.daemon.LineMarkerInfo
 import com.intellij.codeInsight.daemon.LineMarkerProvider
 import com.intellij.openapi.editor.markup.GutterIconRenderer
@@ -13,6 +14,10 @@ import com.intellij.psi.PsiWhiteSpace
 /**
  * 编辑器行号区域图标显示助手
  * 使用 LineMarkerProvider 在编辑器行号区域显示收藏图标
+ *
+ * 1.2.0 双作用域：当前文件的行收藏图标同时覆盖两个作用域——
+ * 项目作用域按【相对路径】匹配、全局作用域按【绝对路径】匹配；
+ * 两个作用域都使用行收藏索引（O(1) 查找），保持现有性能（避免全量扫描）。
  */
 class BookmarkGutterHelper : LineMarkerProvider {
 
@@ -35,18 +40,15 @@ class BookmarkGutterHelper : LineMarkerProvider {
             return null
         }
 
-        val bookmarkManager = BookmarkManager.getInstance(project)
-        val filePath = getRelativeFilePath(project, virtualFile.path) ?: return null
-
-        // 查找该行的收藏
-        val bookmarks = bookmarkManager.getLineBookmarks(filePath, lineNumber)
+        // 查找该行的收藏：项目作用域（相对路径索引）+ 全局作用域（绝对路径索引）
+        val bookmarks = findLineBookmarks(project, virtualFile.path, lineNumber)
             .filter { it.type == BookmarkType.LINE }
 
         if (bookmarks.isEmpty()) {
             return null
         }
 
-        // 优先显示助记符收藏，如果没有则显示匿名收藏
+        // 优先显示助记符收藏（项目作用域优先于全局作用域），否则显示匿名收藏
         val mnemonicBookmark = bookmarks.firstOrNull { it.isMnemonic() }
         val bookmark = mnemonicBookmark ?: bookmarks.firstOrNull { it.isAnonymous() } ?: return null
 
@@ -67,6 +69,30 @@ class BookmarkGutterHelper : LineMarkerProvider {
             GutterIconRenderer.Alignment.LEFT,
             { "收藏: ${bookmark.getDisplayName()}" }
         )
+    }
+
+    /**
+     * 查询两个作用域内某文件某行的行收藏（均走索引，避免全量扫描）
+     *
+     * @param project 当前项目
+     * @param absolutePath 文件绝对路径（VFS 风格正斜杠）
+     * @param lineNumber 0 基行号
+     */
+    private fun findLineBookmarks(project: Project, absolutePath: String, lineNumber: Int): List<Bookmark> {
+        // ////////////////  项目作用域：相对路径匹配  start  /////////////////////////////
+        val relativePath = getRelativeFilePath(project, absolutePath)
+        val projectHits = relativePath?.let {
+            BookmarkManager.getInstance(project).getLineBookmarks(it, lineNumber)
+        } ?: emptyList()
+        // ////////////////  项目作用域  end  //////////////////////////////////////////
+
+        // ////////////////  全局作用域：绝对路径匹配  start  ////////////////////////////
+        val globalHits = GlobalBookmarkManager.getInstance().getLineBookmarks(absolutePath, lineNumber)
+        // ////////////////  全局作用域  end  //////////////////////////////////////////
+
+        // ////////////////  返回：项目作用域在前（优先展示）  start  ////////////////////
+        return projectHits + globalHits
+        // ////////////////  返回  end  ///////////////////////////////////////////////
     }
 
     /**

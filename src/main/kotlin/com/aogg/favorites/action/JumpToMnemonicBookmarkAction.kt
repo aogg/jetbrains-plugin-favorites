@@ -15,6 +15,8 @@ import com.intellij.openapi.vfs.LocalFileSystem
  * 跳转到助记符收藏的动作
  * 支持 36 个快捷键（0-9, A-Z）
  * 从 Action ID 中提取助记符（格式：Favorites.JumpToMnemonic.[0-9/A-Z]）
+ *
+ * 1.2.0 双作用域：先查项目作用域，查不到再查全局作用域。
  */
 class JumpToMnemonicBookmarkAction : AnAction() {
 
@@ -38,10 +40,12 @@ class JumpToMnemonicBookmarkAction : AnAction() {
         val project = e.project ?: return
         val mnemonic = getMnemonic(e) ?: return
         val bookmarkManager = BookmarkManager.getInstance(project)
-        
-        // 获取助记符对应的收藏
-        val bookmark = bookmarkManager.getBookmarkByMnemonic(mnemonic) ?: return
-        
+
+        // 获取助记符对应的收藏：先查项目作用域，查不到再查全局作用域
+        val bookmark = bookmarkManager.getBookmarkByMnemonic(mnemonic)
+            ?: com.aogg.favorites.model.GlobalBookmarkManager.getInstance().getBookmarkByMnemonic(mnemonic)
+            ?: return
+
         // 导航到收藏位置
         navigateToBookmark(project, bookmark)
     }
@@ -49,16 +53,18 @@ class JumpToMnemonicBookmarkAction : AnAction() {
     override fun update(e: AnActionEvent) {
         val project = e.project
         val mnemonic = getMnemonic(e)
-        
+
         if (project == null || mnemonic == null) {
             e.presentation.isEnabled = false
             return
         }
-        
+
+        // 助记符在任一作用域存在即可跳转（先项目后全局）
         val bookmarkManager = BookmarkManager.getInstance(project)
         val bookmark = bookmarkManager.getBookmarkByMnemonic(mnemonic)
+            ?: com.aogg.favorites.model.GlobalBookmarkManager.getInstance().getBookmarkByMnemonic(mnemonic)
         e.presentation.isEnabled = bookmark != null
-        
+
         // 更新显示文本
         e.presentation.text = "跳转到收藏 [$mnemonic]"
     }
