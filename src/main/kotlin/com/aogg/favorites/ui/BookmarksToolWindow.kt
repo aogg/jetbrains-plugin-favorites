@@ -5,6 +5,8 @@ import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.model.FavoritesTransferService
+import com.aogg.favorites.model.MatchRule
+import com.aogg.favorites.model.RuleMatchManager
 import com.aogg.favorites.model.SortType
 import com.aogg.favorites.settings.FavoritesConfigurable
 import com.intellij.icons.AllIcons
@@ -14,6 +16,8 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.ide.DataManager
 import com.intellij.openapi.actionSystem.DataContext
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.InputValidator
@@ -34,10 +38,11 @@ import javax.swing.event.DocumentListener
 
 /**
  * 收藏工具窗口
- * 提供统一的收藏管理界面（1.3.0 PhpStorm 风格树 + 双作用域）：
- * - 顶部：SearchTextField 实时过滤（作用域/描述/文件名/路径/列表名）+ 排序方式下拉（按列表记忆持久化，两作用域独立）
- * - 中部：ToolbarDecorator + 树（作用域→列表→文件系统风格树：虚拟目录链/文件/行收藏/文件夹懒加载）
- * - 工具栏：添加收藏 / 编辑描述 / 删除 / 添加助记符 / 导入原生书签 / 全部展开 / 全部折叠 / 收藏设置（最后一个）
+ * 提供统一的收藏管理界面（1.3.0 PhpStorm 风格树 + 双作用域 + 1.4.0 规则匹配）：
+ * - 顶部：SearchTextField 实时过滤（作用域/描述/文件名/路径/列表名/规则名/条目文本）+ 排序方式下拉（按列表记忆持久化，两作用域独立）
+ * - 中部：ToolbarDecorator + 树（作用域→列表→文件系统风格树：虚拟目录链/文件/行收藏/文件夹懒加载 + 规则匹配第三根节点）
+ * - 工具栏：添加收藏 / 编辑描述 / 删除 / 添加助记符 / 导入原生书签 / 全部展开 / 全部折叠 / 收藏设置 / 新建规则 / 刷新规则（最后两个为 1.4.0 新增）
+ * - 打开工具窗口时后台自动全量刷新一次规则（不阻塞 UI）
  */
 class BookmarksToolWindowFactory : ToolWindowFactory {
 
@@ -45,6 +50,17 @@ class BookmarksToolWindowFactory : ToolWindowFactory {
         val toolWindowPanel = BookmarksToolWindowPanel(project)
         val content = ContentFactory.SERVICE.getInstance().createContent(toolWindowPanel, "", false)
         toolWindow.contentManager.addContent(content)
+
+        // 打开工具窗口时后台自动全量刷新一次规则（不阻塞 UI；失败仅记日志不影响其它功能）
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
+            runCatching { RuleMatchManager.getInstance(project).refreshAll() }
+                .onFailure { log.warn("打开工具窗口自动全刷规则失败", it) }
+        }
+    }
+
+    companion object {
+        private val log = Logger.getInstance(BookmarksToolWindowFactory::class.java)
     }
 }
 
@@ -98,6 +114,31 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             override fun deleteList(scope: FavoriteScope, listName: String?) {
                 deleteSelectedList(scope, listName)
             }
+
+            // 规则匹配（1.4.0 第三个根节点）
+            override fun createRule() {
+                createNewRule()
+            }
+
+            override fun refreshAllRules() {
+                RuleMatchManager.getInstance(project).refreshAll()
+            }
+
+            override fun refreshRule(rule: MatchRule) {
+                RuleMatchManager.getInstance(project).refreshRule(rule.id)
+            }
+
+            override fun editRule(rule: MatchRule) {
+                editExistingRule(rule)
+            }
+
+            override fun toggleRuleEnabled(rule: MatchRule) {
+                toggleRuleEnabledState(rule)
+            }
+
+            override fun deleteRule(rule: MatchRule) {
+                deleteRuleWithConfirm(rule)
+            }
         })
 
         // 搜索过滤（按作用域/描述/文件名/路径/列表名实时过滤，命中项重建文件系统骨架）
@@ -133,7 +174,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         northPanel.add(sortPanel, BorderLayout.EAST)
         add(northPanel, BorderLayout.NORTH)
 
-        // 工具栏（ToolbarDecorator 原生观感；最后一个按钮为"收藏设置"）
+        // 工具栏（ToolbarDecorator 原生观感；1.4.0 新增「新建规则」「刷新规则」置于现有 extraAction 之后）
         val decorator = ToolbarDecorator.createDecorator(bookmarksTree)
             .disableUpDownActions()
             .setAddActionName("添加收藏")
@@ -147,6 +188,8 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             .addExtraAction(ExpandAllAction())
             .addExtraAction(CollapseAllAction())
             .addExtraAction(OpenFavoritesSettingsAction())
+            .addExtraAction(CreateRuleAction())
+            .addExtraAction(RefreshAllRulesAction())
         add(decorator.createPanel(), BorderLayout.CENTER)
 
         // 选中变化时同步排序下拉显示
@@ -400,6 +443,63 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         }
     }
 
+    // ==================== 规则匹配操作（1.4.0 第三个根节点） ====================
+
+    /**
+     * 新建规则：编辑对话框（新建模式），OK 后持久化并立即后台执行一次
+     */
+    private fun createNewRule() {
+        val dialog = RuleEditDialog(project, null)
+        if (!dialog.showAndGet()) return
+        val rule = dialog.buildRule() ?: return
+        val manager = RuleMatchManager.getInstance(project)
+        manager.addRule(rule)
+        refreshTreeOnly()
+        // 新建后立即后台执行一次，完成后自动刷新树
+        manager.refreshRule(rule.id)
+    }
+
+    /**
+     * 编辑规则：编辑对话框（编辑模式，回填既有值），OK 后更新并重新执行一次
+     */
+    private fun editExistingRule(rule: MatchRule) {
+        val dialog = RuleEditDialog(project, rule)
+        if (!dialog.showAndGet()) return
+        val edited = dialog.buildRule() ?: return
+        val manager = RuleMatchManager.getInstance(project)
+        manager.updateRule(edited)
+        refreshTreeOnly()
+        manager.refreshRule(edited.id)
+    }
+
+    /**
+     * 切换规则启用/禁用：禁用不参与全部刷新；重新启用时自动执行一次
+     */
+    private fun toggleRuleEnabledState(rule: MatchRule) {
+        val manager = RuleMatchManager.getInstance(project)
+        manager.updateRule(rule.copy(enabled = !rule.enabled))
+        refreshTreeOnly()
+        if (rule.enabled) {
+            // 原来是禁用态 → 本次为启用，自动执行一次出结果
+            manager.refreshRule(rule.id)
+        }
+    }
+
+    /**
+     * 删除规则（带确认框）：删除后结果缓存一并清除
+     */
+    private fun deleteRuleWithConfirm(rule: MatchRule) {
+        val result = Messages.showYesNoDialog(
+            project,
+            "确定要删除规则「${rule.name}」吗？删除后其匹配结果一并清除。",
+            "删除规则",
+            Messages.getQuestionIcon()
+        )
+        if (result != Messages.YES) return
+        RuleMatchManager.getInstance(project).removeRule(rule.id)
+        refreshTreeOnly()
+    }
+
     // ==================== 排序（按选中列表所在作用域生效） ====================
 
     private fun applySortType(type: SortType) {
@@ -477,6 +577,26 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         override fun actionPerformed(e: AnActionEvent) {
             // 直接按 Configurable 类打开，避免按显示名匹配产生歧义
             ShowSettingsUtil.getInstance().showSettingsDialog(project, FavoritesConfigurable::class.java)
+        }
+    }
+
+    /**
+     * 新建规则按钮（1.4.0）：打开规则编辑对话框（新建模式）
+     */
+    private inner class CreateRuleAction :
+        AnAction("新建规则", "新建一条匹配规则（正则/SQL/SSH，当前支持正则）", AllIcons.General.Add) {
+        override fun actionPerformed(e: AnActionEvent) {
+            createNewRule()
+        }
+    }
+
+    /**
+     * 刷新规则按钮（1.4.0）：并行刷新全部启用规则（后台执行，完成后自动刷新树）
+     */
+    private inner class RefreshAllRulesAction :
+        AnAction("刷新规则", "并行刷新全部启用规则", AllIcons.Actions.Refresh) {
+        override fun actionPerformed(e: AnActionEvent) {
+            RuleMatchManager.getInstance(project).refreshAll()
         }
     }
 

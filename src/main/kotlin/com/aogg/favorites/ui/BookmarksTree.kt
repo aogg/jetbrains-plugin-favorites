@@ -5,6 +5,10 @@ import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.model.ListInfo
+import com.aogg.favorites.model.MatchRule
+import com.aogg.favorites.model.RuleMatchManager
+import com.aogg.favorites.rules.RuleItem
+import com.aogg.favorites.rules.RuleStatus
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -16,6 +20,7 @@ import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
@@ -188,6 +193,95 @@ data class ScopedList(
     val name: String
 )
 
+/** 规则条目单行显示最大字符数（超长截断加省略号） */
+private const val RULE_ITEM_MAX_TEXT_LENGTH = 120
+
+/**
+ * 规则条目文本单行截断（超长加省略号）
+ */
+private fun truncateRuleItemText(text: String): String =
+    if (text.length > RULE_ITEM_MAX_TEXT_LENGTH) text.take(RULE_ITEM_MAX_TEXT_LENGTH) + "…" else text
+
+/**
+ * 规则匹配根节点用户对象（树第一层第三个根节点，排在全局收藏之后）
+ *
+ * @param enabledRuleCount 启用中的规则数（徽标展示）
+ * @param totalItemCount 全部规则 OK 结果条目总数（徽标展示）
+ */
+data class RulesRootNode(
+    val enabledRuleCount: Int,
+    val totalItemCount: Int
+) {
+    override fun toString(): String = "规则匹配 ($enabledRuleCount 规则/$totalItemCount 条)"
+}
+
+/**
+ * 规则节点用户对象（规则匹配根节点的子节点）
+ * toString 同时作为 TreeSpeedSearch 的匹配文本
+ *
+ * @param rule 规则
+ * @param status 最近一次执行状态（未执行过为 null，主文本仅显示规则名）
+ * @param count OK 状态的结果条目数（无结果时照常显示 0）
+ * @param error ERROR 状态的失败原因（渲染器取其设置节点 tooltip）
+ */
+data class RuleNode(
+    val rule: MatchRule,
+    val status: RuleStatus?,
+    val count: Int,
+    val error: String? = null
+) {
+    override fun toString(): String = buildString {
+        append(rule.name)
+        when (status) {
+            RuleStatus.LOADING -> append(" ⏳ 执行中")
+            RuleStatus.OK -> append(" ✅ $count")
+            RuleStatus.ERROR -> append(" ❌")
+            null -> {}
+        }
+        if (!rule.enabled) append("（已禁用）")
+    }
+}
+
+/**
+ * 规则结果条目节点用户对象（规则节点的子节点）
+ * toString 同时作为 TreeSpeedSearch 的匹配文本
+ *
+ * @param ruleId 所属规则 id（预留：后续按规则维度操作条目时使用）
+ * @param item 结果条目（FileItem 可跳转；RowItem 带 path 可跳转；LineItem 仅展示）
+ */
+class RuleItemNode(val ruleId: String, val item: RuleItem) {
+
+    /**
+     * 是否可跳转：FileItem 恒可；RowItem 带 path 可；LineItem 不可
+     */
+    val jumpable: Boolean
+        get() = when (item) {
+            is RuleItem.FileItem -> item.path.isNotBlank()
+            is RuleItem.RowItem -> !item.path.isNullOrBlank()
+            is RuleItem.LineItem -> false
+        }
+
+    override fun toString(): String = when (item) {
+        is RuleItem.FileItem -> item.path.substringAfterLast('/')
+        is RuleItem.RowItem -> truncateRuleItemText(item.cells.joinToString("  "))
+        is RuleItem.LineItem -> truncateRuleItemText(item.text)
+    }
+
+    /**
+     * 详情文本（双击/右键「查看详情」信息框展示完整内容）
+     */
+    fun detailText(): String = when (item) {
+        is RuleItem.FileItem -> item.path
+        is RuleItem.RowItem -> buildString {
+            append(item.cells.joinToString("\t"))
+            if (!item.path.isNullOrBlank()) {
+                append("\n路径: ").append(item.path)
+            }
+        }
+        is RuleItem.LineItem -> item.text
+    }
+}
+
 /**
  * 收藏树组件（1.3.0 PhpStorm 风格树状视图）：
  * 第一层=作用域（项目收藏/全局收藏，始终显示+总数徽标），第二层=列表，
@@ -198,14 +292,20 @@ data class ScopedList(
  * - 文件夹收藏(FOLDER)为虚拟目录链上带收藏标记的目录节点，首次展开懒加载真实子文件/子文件夹
  *   （含未收藏项，深层逐级懒加载）；目录不存在/不可读显示缺失态（红叉）
  *
+ * 规则匹配（1.4.0）：第一层追加第三个根节点「规则匹配」（排在全局收藏之后，始终显示）：
+ * - 规则匹配根 → 规则节点（名称+状态后缀 ✅ M / ⏳ 执行中 / ❌，ERROR tooltip=失败原因）→ 结果条目节点
+ * - 条目：FileItem 双击跳转（文件打开/目录 Project 视图选中）；RowItem/LineItem 双击弹信息框显示完整内容
+ * - 右键菜单：规则根=新建规则/全部刷新；规则=刷新此规则/编辑规则/启用禁用/删除规则；条目=跳转（仅可跳转的）
+ * - 搜索过滤：规则名与条目文本参与匹配（规则名命中放行全部条目，否则仅保留命中条目）
+ *
  * 交互：
  * - Enter / 双击 = 跳转（行→编辑器定位；文件→打开；文件夹→Project 视图选中；未收藏真实节点同样可跳转）
  * - F2 = 编辑描述、Del = 删除（通过 [Interactions] 回调到面板实现；未收藏真实节点收藏类操作不可用）
- * - 右键菜单：跳转/编辑描述/设置助记符/移动到列表(按作用域分组)/列表CRUD/删除收藏
+ * - 右键菜单：跳转/编辑描述/设置助记符/移动到列表(按作用域分组)/列表CRUD/删除收藏 + 规则匹配菜单
  * - 选中行收藏时预览打开文件但不抢焦点（openFile(file, false)）
  * - 装 TreeSpeedSearch（TreeUIHelper.installTreeSpeedSearch），各节点 toString 均参与匹配
- * - 搜索过滤时作用域名/列表名/文件名/路径/描述均参与匹配，过滤后虚拟目录链按命中项重建
- * - 刷新（含过滤）保留已展开目录的展开状态；作用域/列表层级始终展开
+ * - 搜索过滤时作用域名/列表名/文件名/路径/描述/规则名/条目文本均参与匹配，过滤后虚拟目录链按命中项重建
+ * - 刷新（含过滤）保留已展开目录的展开状态；作用域/列表/规则根/规则层级始终展开
  */
 class BookmarksTree(
     private val project: Project,
@@ -213,7 +313,7 @@ class BookmarksTree(
 ) : Tree() {
 
     /**
-     * 面板侧交互回调（带作用域：列表操作作用于所在作用域）
+     * 面板侧交互回调（带作用域：列表操作作用于所在作用域；规则操作回调到面板弹对话框/驱动管理器）
      */
     interface Interactions {
         fun editSelectedBookmark()
@@ -223,6 +323,14 @@ class BookmarksTree(
         fun createList(scope: FavoriteScope)
         fun renameList(scope: FavoriteScope, listName: String?)
         fun deleteList(scope: FavoriteScope, listName: String?)
+
+        // 规则匹配（1.4.0 第三个根节点）
+        fun createRule()
+        fun refreshAllRules()
+        fun refreshRule(rule: MatchRule)
+        fun editRule(rule: MatchRule)
+        fun toggleRuleEnabled(rule: MatchRule)
+        fun deleteRule(rule: MatchRule)
     }
 
     companion object {
@@ -401,6 +509,10 @@ class BookmarksTree(
         }
         // ////////////////  第一层  end  ////////////////////////////////////////////////
 
+        // ////////////////  第一层附加：规则匹配根节点（第三个根，排在全局收藏之后）  start //
+        root.add(buildRulesSubtree(query))
+        // ////////////////  第一层附加  end  ///////////////////////////////////////////
+
         // ////////////////  逻辑后：替换模型并恢复展开态  start  /////////////////////////
         listSpines = spines
         model = DefaultTreeModel(root)
@@ -409,6 +521,68 @@ class BookmarksTree(
         }
         // ////////////////  逻辑后  end  ///////////////////////////////////////////////
     }
+
+    /**
+     * 构建「规则匹配」子树（第三个根节点）：规则匹配根 → 规则节点（名称+状态后缀）→ 结果条目节点
+     * 管理器/存储异常时兜底渲染空根节点，不影响收藏树其它部分。
+     *
+     * @param query 过滤关键字（小写；空串表示不过滤）
+     * @return 规则匹配根树节点（始终非 null）
+     */
+    private fun buildRulesSubtree(query: String): DefaultMutableTreeNode {
+        // ////////////////  准备数据：规则与结果缓存（平台调用兜底）  start  ///////////////
+        val manager = runCatching { RuleMatchManager.getInstance(project) }.getOrNull()
+        val rules = manager?.getRules().orEmpty()
+        val enabledRuleCount = rules.count { it.enabled }
+        val totalItemCount = rules.sumOf { rule ->
+            val result = manager?.getResult(rule.id)
+            if (result?.status == RuleStatus.OK) result.items.size else 0
+        }
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：规则节点 + 条目节点（应用过滤）  start  //////////////
+        val rootNode = DefaultMutableTreeNode(RulesRootNode(enabledRuleCount, totalItemCount))
+        if (manager == null) {
+            return rootNode
+        }
+
+        for (rule in rules) {
+            val result = manager.getResult(rule.id)
+            val items = result?.items ?: emptyList()
+            // 规则名命中过滤词时放行全部条目；否则仅保留文本命中的条目（不过滤时全部显示）
+            val ruleMatches = query.isEmpty() || rule.name.lowercase(Locale.ROOT).contains(query)
+            val visibleItems = if (query.isEmpty() || ruleMatches) {
+                items
+            } else {
+                items.filter { ruleItemMatches(it, query) }
+            }
+            if (query.isNotEmpty() && !ruleMatches && visibleItems.isEmpty()) continue
+
+            val ruleTreeNode = DefaultMutableTreeNode(
+                RuleNode(
+                    rule = rule,
+                    status = result?.status,
+                    count = items.size,
+                    error = result?.error
+                )
+            )
+            for (item in visibleItems) {
+                ruleTreeNode.add(DefaultMutableTreeNode(RuleItemNode(rule.id, item)))
+            }
+            rootNode.add(ruleTreeNode)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // ////////////////  返回  start  //////////////////////////////////////////////
+        return rootNode
+        // ////////////////  返回  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 规则结果条目是否命中过滤词（条目完整文本，含路径/各列/行文本）
+     */
+    private fun ruleItemMatches(item: RuleItem, query: String): Boolean =
+        item.searchText().lowercase(Locale.ROOT).contains(query)
 
     /**
      * 全部展开（懒加载目录展开后行数会增加，循环展开直到行数稳定或达安全上限）
@@ -535,9 +709,57 @@ class BookmarksTree(
                     selectInProjectView(dirFile!!)
                 }
             }
+            is RuleItemNode -> activateRuleItem(userObject)
             else -> {}
         }
         // ////////////////  分支二  end  //////////////////////////////////////////////
+    }
+
+    /**
+     * 激活规则结果条目（双击/Enter）：
+     * FileItem → 跳转（文件打开/目录 Project 视图选中）；RowItem/LineItem → 弹信息框显示完整内容
+     *
+     * @param node 规则条目节点用户对象
+     */
+    private fun activateRuleItem(node: RuleItemNode) {
+        // ////////////////  核心逻辑：按条目类型分流  start  /////////////////////////////
+        when (val item = node.item) {
+            is RuleItem.FileItem -> jumpToRuleItemPath(item.path, item.isFolder)
+            is RuleItem.RowItem -> showRuleItemInfoDialog(node)
+            is RuleItem.LineItem -> showRuleItemInfoDialog(node)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 跳转到规则结果条目路径（相对项目根为主，兼容绝对路径；目录→Project 视图选中，文件→打开）
+     *
+     * @param path 条目路径
+     * @param isFolder 条目是否为目录（路径不存在时按该标记决定展示方式）
+     */
+    private fun jumpToRuleItemPath(path: String, isFolder: Boolean) {
+        // ////////////////  校验参数  start  ///////////////////////////////////////////
+        if (path.isBlank()) return
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：解析 VirtualFile 后按类型跳转  start  ///////////////
+        val file = resolveByAbsolutePath(path, FavoritesTreePaths.isAbsolutePath(path)) ?: return
+        if (!file.isValid) return
+        if (isFolder || file.isDirectory) {
+            selectInProjectView(file)
+        } else {
+            openFileNode(file)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 弹信息框显示规则条目完整内容（RowItem 多列 tab 拼接 + 可选路径行；LineItem 完整行文本）
+     */
+    private fun showRuleItemInfoDialog(node: RuleItemNode) {
+        runCatching {
+            Messages.showInfoMessage(project, node.detailText(), "规则结果详情")
+        }.onFailure { log.warn("显示规则条目详情失败", it) }
     }
 
     /**
@@ -577,11 +799,24 @@ class BookmarksTree(
     }
 
     /**
-     * 右键菜单（列表操作按选中上下文的作用域执行；未收藏真实节点仅提供跳转，收藏类操作不可用）
+     * 右键菜单（列表操作按选中上下文的作用域执行；未收藏真实节点仅提供跳转，收藏类操作不可用；
+     * 规则匹配子树提供独立菜单：规则根=新建/全刷、规则=刷新/编辑/启禁/删除、条目=跳转/查看详情）
      */
     private fun showPopupMenu(e: MouseEvent) {
         val path = getPathForLocation(e.x, e.y) ?: return
         selectionPath = path
+
+        // ////////////////  分支零：规则匹配子树独立右键菜单  start  /////////////////////
+        val clickedUserObject = (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject
+        if (clickedUserObject is RulesRootNode || clickedUserObject is RuleNode || clickedUserObject is RuleItemNode) {
+            val ruleGroup = DefaultActionGroup()
+            buildRulePopupMenu(ruleGroup, clickedUserObject)
+            val rulePopup = ActionManager.getInstance()
+                .createActionPopupMenu("FavoritesToolWindowPopupMenu", ruleGroup)
+            rulePopup.component.show(this, e.x, e.y)
+            return
+        }
+        // ////////////////  分支零  end  //////////////////////////////////////////////
 
         val group = DefaultActionGroup()
         val selectedBookmarks = getSelectedBookmarks()
@@ -689,6 +924,84 @@ class BookmarksTree(
         }
         // ////////////////  按作用域分组  end  /////////////////////////////////////////
         return group
+    }
+
+    /**
+     * 构建「规则匹配」子树右键菜单：
+     * - 规则根节点：新建规则 / 全部刷新
+     * - 规则节点：刷新此规则 / 编辑规则 / 启用|禁用（切换）/ 删除规则
+     * - 条目节点：跳转（仅可跳转的）+ 查看详情（RowItem/LineItem）
+     *
+     * @param group 菜单挂载的动作组
+     * @param userObject 点击节点的用户对象（RulesRootNode/RuleNode/RuleItemNode）
+     */
+    private fun buildRulePopupMenu(group: DefaultActionGroup, userObject: Any) {
+        // ////////////////  分支一：规则根节点  start  //////////////////////////////////
+        if (userObject is RulesRootNode) {
+            group.add(object : AnAction("新建规则", "新建一条匹配规则", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.createRule()
+                }
+            })
+            group.add(object : AnAction("全部刷新", "并行刷新全部启用规则", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.refreshAllRules()
+                }
+            })
+            return
+        }
+        // ////////////////  分支一  end  //////////////////////////////////////////////
+
+        // ////////////////  分支二：规则节点  start  ////////////////////////////////////
+        if (userObject is RuleNode) {
+            val rule = userObject.rule
+            group.add(object : AnAction("刷新此规则", "重新执行该规则并刷新结果", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.refreshRule(rule)
+                }
+            })
+            group.add(object : AnAction("编辑规则", "编辑该规则的名称与参数", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.editRule(rule)
+                }
+            })
+            group.add(object : AnAction(
+                if (rule.enabled) "禁用" else "启用",
+                if (rule.enabled) "禁用后不参与全部刷新" else "启用后参与全部刷新",
+                null
+            ) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.toggleRuleEnabled(rule)
+                }
+            })
+            group.add(Separator.getInstance())
+            group.add(object : AnAction("删除规则", "删除该规则（结果一并清除）", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.deleteRule(rule)
+                }
+            })
+            return
+        }
+        // ////////////////  分支二  end  //////////////////////////////////////////////
+
+        // ////////////////  分支三：条目节点（跳转仅可跳转的）  start  /////////////////////
+        if (userObject is RuleItemNode) {
+            if (userObject.jumpable) {
+                group.add(object : AnAction("跳转", "打开文件或在 Project 视图中选中目录", null) {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        navigateToSelection()
+                    }
+                })
+            }
+            if (userObject.item !is RuleItem.FileItem) {
+                group.add(object : AnAction("查看详情", "显示条目完整内容", null) {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        showRuleItemInfoDialog(userObject)
+                    }
+                })
+            }
+        }
+        // ////////////////  分支三  end  //////////////////////////////////////////////
     }
 
     private fun registerKeyStrokes() {
@@ -999,7 +1312,7 @@ class BookmarksTree(
     }
 
     /**
-     * 恢复展开态：作用域/列表层级始终展开；目录节点按刷新前记忆恢复（展开动作经
+     * 恢复展开态：作用域/列表/规则根/规则层级始终展开；目录节点按刷新前记忆恢复（展开动作经
      * TreeWillExpandListener 触发懒加载，加载完成后继续向子级递归）
      *
      * @param node 当前处理的树节点
@@ -1007,14 +1320,14 @@ class BookmarksTree(
      */
     private fun restoreExpansion(node: DefaultMutableTreeNode, expandedDirKeys: Set<String>) {
         when (val userObject = node.userObject) {
-            // ////////////////  作用域/列表层级：始终展开并继续向下  start  ////////////////
-            is ScopeNode, is BookmarkListNode -> {
+            // ////////////////  作用域/列表/规则根/规则层级：始终展开并继续向下  start  ///////
+            is ScopeNode, is BookmarkListNode, is RulesRootNode, is RuleNode -> {
                 expandPath(TreePath(node.path))
                 for (child in node.children()) {
                     restoreExpansion(child as DefaultMutableTreeNode, expandedDirKeys)
                 }
             }
-            // ////////////////  作用域/列表层级  end  /////////////////////////////////////
+            // ////////////////  作用域/列表/规则根/规则层级  end  //////////////////////////
 
             // ////////////////  目录层级：按记忆恢复展开（触发懒加载）  start  //////////////
             is DirNode -> {
