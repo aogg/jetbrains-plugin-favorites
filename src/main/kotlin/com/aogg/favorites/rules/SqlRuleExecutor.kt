@@ -6,7 +6,6 @@ import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
-import java.sql.DriverManager
 import java.sql.ResultSet
 
 /**
@@ -18,11 +17,15 @@ import java.sql.ResultSet
  *   `LocalDataSourceManager` 在 `com.intellij.database.dataSource` 包且 `getInstance(project)` 无参签名
  *   与公开文档不符），故统一纯反射访问：枚举数据源→按名匹配→取其已保存的 URL/用户名/密码
  *   （DatabaseCredentials，含 PasswordSafe 解密）→ 走标准 JDBC 连接。
- *   插件未安装/未启用时抛「未找到 IDE 数据源支持，请改用手动连接」。
- *   注意：驱动 jar 对本插件类加载器可见时才能建连（IDE 单独下载的驱动对本插件不可见），
- *   此场景报错信息会带驱动原因，请改用手动连接并把驱动 jar 放入插件 lib 目录；
- * - 通道二（手动连接）：`DriverManager.getConnection(jdbcUrl, user, 密码)`，
+ *   插件未安装/未启用时抛「未找到 IDE 数据源支持，请改用手动连接」；
+ * - 通道二（手动连接）：按规则里的 URL/用户名/密码建连，
  *   密码从 PasswordSafe 读取（[RulePasswordStore]，XML 永不落明文）；
+ *
+ * 两通道建连统一走 [SqlDriverLoader]：IDE 数据库驱动由 Database Tools 按需下载到 IDE 配置目录、
+ * 不在本插件类加载器可见路径，故不使用 DriverManager（其按调用方类加载器过滤会漏），而是按
+ * URL 前缀推导候选驱动类 → 优先取数据源自带驱动文件（通道一）、再扫全局兜底目录
+ * （IDE 配置目录及跨 IDE 的 jdbc-drivers）→ 动态 URLClassLoader + 实例化 java.sql.Driver 直连；
+ * 驱动 jar 未找到时抛「未找到 xx 驱动 jar，请确认 IDE Database 工具窗已下载该驱动」。
  *
  * 查询执行：Statement + `setQueryTimeout(30)`（驱动不支持时降级不设超时），逐行读 ResultSet
  * （单元格取 [cellToText]，null→""），行数达 limit 即停；sqlPathColumn 非空时该列值填入
@@ -125,7 +128,7 @@ class SqlRuleExecutor : RuleExecutor {
         // ////////////////  分支一：IDE 数据源通道  start  ///////////////////////////////
         if (rule.sqlDatasourceName.isNotBlank()) {
             val config = loadIdeDatasourceConfig(project, rule.sqlDatasourceName.trim())
-            return query(config.url, config.user, config.password, sql, limit, rule.sqlPathColumn)
+            return query(config.url, config.user, config.password, config.dataSource, sql, limit, rule.sqlPathColumn)
         }
         // ////////////////  分支一  end  /////////////////////////////////////////////
 
@@ -135,22 +138,26 @@ class SqlRuleExecutor : RuleExecutor {
             throw IllegalArgumentException("JDBC URL 为空，请编辑规则填写连接地址或选择 IDE 数据源")
         }
         val password = RulePasswordStore.read(rule.id)
-        return query(url, rule.sqlUser.trim(), password, sql, limit, rule.sqlPathColumn)
+        return query(url, rule.sqlUser.trim(), password, null, sql, limit, rule.sqlPathColumn)
         // ////////////////  分支二  end  /////////////////////////////////////////////
     }
 
     /**
-     * 建连并执行查询：Connection/Statement/ResultSet 逐层关闭，任何失败转带原因的异常
+     * 建连并执行查询：连接统一经 [SqlDriverLoader]（数据源驱动文件优先 → 全局 jdbc-drivers 兜底，
+     * 不走 DriverManager）；Connection/Statement/ResultSet 逐层关闭，任何失败转带原因的异常
      */
     private fun query(
         url: String,
         user: String,
         password: String,
+        ideDataSource: Any?,
         sql: String,
         limit: Int,
         pathColumn: String
     ): List<RuleItem> {
-        val connection = runCatching { DriverManager.getConnection(url, user, password) }.getOrElse { error ->
+        val connection = runCatching { SqlDriverLoader.connect(url, user, password, ideDataSource) }.getOrElse { error ->
+            // 驱动缺失/连接失败等已带明确文案的异常直接透出，其余包一层统一前缀
+            if (error is IllegalStateException || error is IllegalArgumentException) throw error
             throw IllegalStateException("数据库连接失败：${error.message ?: error.javaClass.simpleName}", error)
         }
         return connection.use { conn ->
@@ -202,8 +209,14 @@ class SqlRuleExecutor : RuleExecutor {
      * @param url JDBC URL
      * @param user 用户名（可能为空串）
      * @param password 已解密密码（可能为空串）
+     * @param dataSource 数据源对象本体（如 LocalDataSource，供 [SqlDriverLoader] 反射取驱动文件；可能为 null）
      */
-    private data class IdeDatasourceConfig(val url: String, val user: String, val password: String)
+    private data class IdeDatasourceConfig(
+        val url: String,
+        val user: String,
+        val password: String,
+        val dataSource: Any?
+    )
 
     /**
      * 通道一：纯反射读取 IDE 数据源的连接配置（按名匹配；任何一步失败抛带明确文案的异常）
@@ -237,7 +250,7 @@ class SqlRuleExecutor : RuleExecutor {
             val user = runCatching {
                 dataSource?.javaClass?.getMethod("getUsername")?.invoke(dataSource) as? String
             }.getOrNull().orEmpty()
-            IdeDatasourceConfig(url, user, readIdeDatasourcePassword(classLoader, dataSource))
+            IdeDatasourceConfig(url, user, readIdeDatasourcePassword(classLoader, dataSource), dataSource)
         }
         return configResult.getOrElse { error ->
             if (error is IllegalArgumentException || error is IllegalStateException) throw error
@@ -248,6 +261,11 @@ class SqlRuleExecutor : RuleExecutor {
 
     /**
      * 反射读取 IDE 数据源已保存的密码（DatabaseTools 自己管理存储/解密；失败返回空串按无密码处理）
+     *
+     * OneTimeString 一次性消费疑点已按 233 发行版字节码核实：
+     * `OneTimeString extends CharArrayCharSequence`，未覆写 `toString()`，继承实现为
+     * `new String(chars, start, length)`——只读取、不销毁；真正会清空的是 `toString(clear=true)`。
+     * 故此处优先走反射调 `toString(false)` 显式非销毁读取，失败再按 CharSequence 视角兜底，全 runCatching。
      */
     private fun readIdeDatasourcePassword(classLoader: ClassLoader, dataSource: Any?): String {
         // ////////////////  校验参数  start  ///////////////////////////////////////////
@@ -255,15 +273,30 @@ class SqlRuleExecutor : RuleExecutor {
         // ////////////////  校验参数  end  /////////////////////////////////////////////
 
         // ////////////////  返回：DatabaseCredentials.getPassword(ds)→OneTimeString  start  //
-        return runCatching {
+        val raw = runCatching {
             val credentialsClass = Class.forName(DATABASE_CREDENTIALS_CLASS, true, classLoader)
             val pointClass = Class.forName("com.intellij.database.model.DasDataSource", true, classLoader)
             val credentials = credentialsClass.getMethod("getInstance").invoke(null)
-            // OneTimeString 只能消费一次，toString 恰好调用一次
             credentialsClass.getMethod("getPassword", pointClass).invoke(credentials, dataSource)
-                ?.toString().orEmpty()
         }.onFailure { log.warn("读取 IDE 数据源密码失败（按无密码继续）", it) }
-            .getOrDefault("")
+            .getOrNull() ?: return ""
+
+        extractOneTimeStringText(raw)?.let { return it }
+        log.warn("IDE 数据源密码对象无法转为文本（按无密码继续）")
+        return ""
         // ////////////////  返回  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * OneTimeString → 文本的稳妥读取：优先 `toString(false)`（显式不销毁），失败按 CharSequence 兜底；
+     * 两条路都失败返回 null（调用方按无密码继续）。全 runCatching，不抛异常。
+     */
+    private fun extractOneTimeStringText(raw: Any): String? {
+        val viaNonClearingCall = runCatching {
+            raw.javaClass.getMethod("toString", Boolean::class.javaPrimitiveType)
+                .invoke(raw, false) as? String
+        }.getOrNull()
+        if (viaNonClearingCall != null) return viaNonClearingCall
+        return runCatching { (raw as? CharSequence)?.toString() }.getOrNull()
     }
 }
