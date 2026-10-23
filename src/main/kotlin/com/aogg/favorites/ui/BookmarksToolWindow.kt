@@ -34,9 +34,9 @@ import javax.swing.event.DocumentListener
 
 /**
  * 收藏工具窗口
- * 提供统一的收藏管理界面（1.2.0 四层树 + 双作用域）：
- * - 顶部：SearchTextField 实时过滤（作用域/描述/文件名/列表名）+ 排序方式下拉（按列表记忆持久化，两作用域独立）
- * - 中部：ToolbarDecorator + 树（作用域→列表→类型分组→收藏）
+ * 提供统一的收藏管理界面（1.3.0 PhpStorm 风格树 + 双作用域）：
+ * - 顶部：SearchTextField 实时过滤（作用域/描述/文件名/路径/列表名）+ 排序方式下拉（按列表记忆持久化，两作用域独立）
+ * - 中部：ToolbarDecorator + 树（作用域→列表→文件系统风格树：虚拟目录链/文件/行收藏/文件夹懒加载）
  * - 工具栏：添加收藏 / 编辑描述 / 删除 / 添加助记符 / 导入原生书签 / 全部展开 / 全部折叠 / 收藏设置（最后一个）
  */
 class BookmarksToolWindowFactory : ToolWindowFactory {
@@ -100,7 +100,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             }
         })
 
-        // 搜索过滤（按作用域/描述/文件名/列表名实时过滤）
+        // 搜索过滤（按作用域/描述/文件名/路径/列表名实时过滤，命中项重建文件系统骨架）
         searchField.addDocumentListener(object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) {
                 applyFilter()
