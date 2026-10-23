@@ -24,8 +24,8 @@ import java.util.Properties
  *      / `getAdditionalClasspathElements()` → `SimpleClasspathElement.getClassesRootUrls()`，
  *      全反射 + runCatching，另容忍 `getDriverFiles()` 的版本差异）；
  *   2. 全局兜底：`PathManager.getConfigDir()/jdbc-drivers` 及
- *      `~/.config/JetBrains/*/jdbc-drivers`、`~/AppData/Roaming/JetBrains/*/jdbc-drivers`、
- *      `~/Library/Application Support/JetBrains/*/jdbc-drivers`（存在才扫），递归匹配文件名含
+ *      `~/.config/JetBrains/<各IDE>/jdbc-drivers`、`~/AppData/Roaming/JetBrains/<各IDE>/jdbc-drivers`、
+ *      `~/Library/Application Support/JetBrains/<各IDE>/jdbc-drivers`（存在才扫），递归匹配文件名含
  *      mysql-connector / postgresql / mariadb-java-client / sqlite-jdbc / h2 / mssql-jdbc / ojdbc 的 jar；
  * - 用收集到的 jar 建 `URLClassLoader`（parent = 本插件类加载器，静态缓存按 jar 集合去重）；
  * - **不走 DriverManager**（它按调用方类加载器过滤会漏本加载器里的驱动），改为实例化
@@ -305,8 +305,8 @@ object SqlDriverLoader {
 
     /**
      * 候选的全局驱动目录（存在才返回）：
-     * IDE 配置目录 jdbc-drivers、~/.config/JetBrains/*/jdbc-drivers、
-     * ~/AppData/Roaming/JetBrains/*/jdbc-drivers、~/Library/Application Support/JetBrains/*/jdbc-drivers
+     * IDE 配置目录 jdbc-drivers、~/.config/JetBrains/<各IDE>/jdbc-drivers、
+     * ~/AppData/Roaming/JetBrains/<各IDE>/jdbc-drivers、~/Library/Application Support/JetBrains/<各IDE>/jdbc-drivers
      */
     private fun globalDriverDirectories(): List<Path> {
         val dirs = mutableListOf<Path>()
