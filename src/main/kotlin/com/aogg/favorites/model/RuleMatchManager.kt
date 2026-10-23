@@ -5,6 +5,8 @@ import com.aogg.favorites.rules.RegexRuleExecutor
 import com.aogg.favorites.rules.RuleExecutor
 import com.aogg.favorites.rules.RuleResult
 import com.aogg.favorites.rules.RuleStatus
+import com.aogg.favorites.rules.SqlRuleExecutor
+import com.aogg.favorites.rules.SshRuleExecutor
 import com.aogg.favorites.ui.BookmarksToolWindowPanel
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
@@ -19,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
  * - 规则 CRUD：读写项目级 [RuleStorageHelper]（.idea/favorites.rules.xml）；
  * - 结果缓存：Map<ruleId, [RuleResult]>（ConcurrentHashMap，EDT 渲染与后台执行并发读写安全）；
  * - 刷新：[refreshRule] 单规则后台执行，[refreshAll] 对启用规则并行刷新
- *   （无执行器的类型 SQL/SSH（本步）直接置 ERROR「执行器待实现」）；
+ *   （未注册执行器的类型兜底置 ERROR「执行器待实现」）；
  * - 执行状态变化后统一 invokeLater 刷新收藏工具窗口（项目已关闭则跳过）。
  *
  * 线程约定：CRUD 仅约定在 EDT 调用（与既有管理器风格一致）；refreshRule/refreshAll 幂等，
@@ -31,7 +33,7 @@ class RuleMatchManager(private val project: Project) {
     companion object {
         private val log = Logger.getInstance(RuleMatchManager::class.java)
 
-        /** 无执行器类型的统一失败文案 */
+        /** 无执行器类型的统一失败文案（兜底分支，当前三类执行器均已注册） */
         private const val EXECUTOR_NOT_IMPLEMENTED = "执行器待实现"
 
         /**
@@ -43,9 +45,11 @@ class RuleMatchManager(private val project: Project) {
         }
     }
 
-    /** 执行器注册表（按规则类型路由；SQL/SSH 执行器下一步通过 [registerExecutor] 接入） */
+    /** 执行器注册表（按规则类型路由；三类执行器 init 注册，新类型可经 [registerExecutor] 扩展） */
     private val executors = ConcurrentHashMap<RuleType, RuleExecutor>().apply {
         put(RuleType.REGEX, RegexRuleExecutor())
+        put(RuleType.SQL, SqlRuleExecutor())
+        put(RuleType.SSH, SshRuleExecutor())
     }
 
     /** 规则结果缓存（ruleId → 最近一次执行结果） */
@@ -54,10 +58,10 @@ class RuleMatchManager(private val project: Project) {
     /** 正在后台执行的规则 id 集合（防重复提交，LOADING 期间重复刷新被忽略） */
     private val refreshingRules: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    // ==================== 执行器注册（供后续 SQL/SSH 执行器扩展） ====================
+    // ==================== 执行器注册（供新类型执行器扩展） ====================
 
     /**
-     * 注册/替换某类型的执行器（下一步 SQL/SSH 执行器接入入口）
+     * 注册/替换某类型的执行器（兜底能力：新类型/测试替身可经此接入）
      *
      * @param type 规则类型
      * @param executor 执行器
@@ -132,7 +136,7 @@ class RuleMatchManager(private val project: Project) {
 
     /**
      * 刷新单个规则：
-     * - 无执行器类型（SQL/SSH，本步）→ 直接置 ERROR「执行器待实现」；
+     * - 无执行器类型（兜底：未来新类型未注册时）→ 直接置 ERROR「执行器待实现」；
      * - 有执行器类型 → 置 LOADING 后交后台线程执行，完成后 invokeLater 刷新工具窗口。
      * 同一规则执行中重复调用会被忽略（防重复提交）；项目已关闭/规则不存在时跳过。
      *
@@ -145,7 +149,7 @@ class RuleMatchManager(private val project: Project) {
         if (!refreshingRules.add(ruleId)) return
         // ////////////////  校验参数  end  ////////////////////////////////////////////
 
-        // ////////////////  分支一：无执行器类型直接置 ERROR（SQL/SSH 本步待实现）  start  //
+        // ////////////////  分支一：无执行器类型兜底置 ERROR  start  ///////////////////
         val executor = executors[rule.type]
         if (executor == null) {
             refreshingRules.remove(ruleId)

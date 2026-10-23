@@ -3,7 +3,7 @@ package com.aogg.favorites.model
 /**
  * 规则类型（1.4.0 规则匹配）
  *
- * REGEX 本步已实现（rules/RegexRuleExecutor）；SQL/SSH 本步仅预留数据结构与 UI 位置，执行器下一步提供。
+ * 三类执行器均已实现并注册（REGEX=RegexRuleExecutor；SQL=SqlRuleExecutor；SSH=SshRuleExecutor）。
  */
 enum class RuleType(val label: String) {
 
@@ -13,12 +13,12 @@ enum class RuleType(val label: String) {
     REGEX("正则匹配"),
 
     /**
-     * SQL 查询（开发中，执行器下一步提供）
+     * SQL 查询：IDE 数据源或手动 JDBC 连接执行 SELECT
      */
     SQL("SQL 查询"),
 
     /**
-     * SSH 命令（开发中，执行器下一步提供）
+     * SSH 命令：本机 ssh 命令执行远程命令取 stdout
      */
     SSH("SSH 命令");
 }
@@ -68,17 +68,18 @@ enum class RegexTarget(val label: String) {
  * @param regexPattern REGEX：Java 正则（对相对项目根路径做 find()，路径 '/' 分隔、无前导斜杠）
  * @param regexTarget REGEX：匹配目标过滤（文件/目录/全部）
  * @param caseInsensitive REGEX：忽略大小写（RegexOption.IGNORE_CASE）
- * @param sqlDatasourceName SQL：IDE 数据源名（空=用手动连接；下一步使用）
- * @param sqlJdbcUrl SQL：手动连接 JDBC URL（下一步使用）
- * @param sqlUser SQL：手动连接用户名（下一步使用）
- * @param sqlPassword SQL：手动连接密码（仅运行期使用；持久化走 PasswordSafe，下一步处理，XML 里不存明文）
- * @param sqlQuery SQL：查询语句（下一步使用）
- * @param sqlPathColumn SQL：可选，该列值作为相对路径用于跳转（下一步使用）
- * @param sshHostAlias SSH：IDE SSH 配置或 ~/.ssh/config 的 Host 别名（空=手填；下一步使用）
- * @param sshManualHost SSH：手动主机（下一步使用）
- * @param sshManualPort SSH：手动端口（下一步使用）
- * @param sshManualUser SSH：手动用户名（下一步使用）
- * @param sshCommand SSH：待执行命令（下一步使用）
+ * @param sqlDatasourceName SQL：IDE 数据源名（空=用手动连接；SqlRuleExecutor 通道一）
+ * @param sqlJdbcUrl SQL：手动连接 JDBC URL（SqlRuleExecutor 通道二）
+ * @param sqlUser SQL：手动连接用户名（SqlRuleExecutor 通道二）
+ * @param sqlPassword SQL：手动连接密码（仅运行期/「测试」临时规则使用；持久化走 PasswordSafe
+ *   （RulePasswordStore），XML 里不存明文）
+ * @param sqlQuery SQL：查询语句（SELECT，须返回结果集）
+ * @param sqlPathColumn SQL：可选，该列值作为相对路径用于跳转
+ * @param sshHostAlias SSH：IDE SSH 配置或 ~/.ssh/config 的 Host 别名（空=手填）
+ * @param sshManualHost SSH：手动主机
+ * @param sshManualPort SSH：手动端口
+ * @param sshManualUser SSH：手动用户名
+ * @param sshCommand SSH：待执行命令
  * @param limit 结果条数上限（1..10000，各类执行器通用）
  */
 data class MatchRule(

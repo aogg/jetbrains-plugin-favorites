@@ -16,7 +16,7 @@ import com.intellij.util.xmlb.XmlSerializerUtil
  *
  * 兼容与安全约定：
  * - 未知规则类型/匹配目标（跨版本脏数据）加载时保守回退（REGEX/ALL），不抛异常；
- * - sqlPassword 刻意不做持久化字段（运行期字段，下一步接入 PasswordSafe，XML 里不落明文）。
+ * - sqlPassword 刻意不做持久化字段（运行期经 PasswordSafe 存取（RulePasswordStore），XML 里不落明文）。
  */
 @State(
     name = "FavoritesMatchRules",
@@ -83,7 +83,7 @@ class RuleStorageHelper : PersistentStateComponent<RuleStorageHelper.State> {
                 sqlDatasourceName = sqlDatasourceName,
                 sqlJdbcUrl = sqlJdbcUrl,
                 sqlUser = sqlUser,
-                // 明文密码不落盘：运行期经 PasswordSafe 读取（下一步实现），此处恒为空串
+                // 明文密码不落盘：执行器运行期经 PasswordSafe 读取（RulePasswordStore），此处恒为空串
                 sqlPassword = "",
                 sqlQuery = sqlQuery,
                 sqlPathColumn = sqlPathColumn,
