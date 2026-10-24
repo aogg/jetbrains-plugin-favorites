@@ -248,7 +248,8 @@ internal class FavoritesListSpine private constructor(
     }
 
     /**
-     * 挂载文件条目（FILE 收藏与 LINE 收藏同路径自动合并进同一 [SpineFileEntry]）
+     * 挂载文件条目（FILE 收藏与 LINE 收藏同路径自动合并进同一 [SpineFileEntry]，同路径有且只有一个文件条目；
+     * 同路径唯一节点的另一半保障在树侧：appendSpineChildren 幂等物化，防止展开懒加载重复追加）
      *
      * @param dirPath 所在目录路径键
      * @param fileName 文件名

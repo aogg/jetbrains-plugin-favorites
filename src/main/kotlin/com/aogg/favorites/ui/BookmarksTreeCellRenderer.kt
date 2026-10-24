@@ -26,6 +26,7 @@ import javax.swing.tree.DefaultMutableTreeNode
  * - 规则匹配根节点（1.4.0）：文件夹图标 + "规则匹配 (N 规则/M 条)"
  * - 规则节点（1.4.0）：按规则类型给图标（正则/SQL/SSH）；主文本含状态后缀（✅ M / ⏳ / ❌），ERROR 时 tooltip=失败原因
  * - 规则条目节点（1.4.0）：FileItem 用 IDE 文件类型图标（文件名+灰色父路径）；RowItem/LineItem 用文档图标
+ * - 兜底：未识别节点类型给通用图标（AllIcons.FileTypes.Any）+ toString 主文本，任何分支漏配/新增节点类型不至于无图标
  * 各节点 toString 返回主文本，作为 TreeSpeedSearch 的匹配文本（灰色说明文字不参与速度搜索）
  *
  * @param project 项目（解析 VirtualFile 计算文件类型图标）
@@ -165,6 +166,11 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                         append(node.toString())
                     }
                 }
+            }
+            // 兜底：未识别节点类型（分支漏配/新增节点类型未配时）给通用图标 + toString 主文本，保证任何节点都有图标可显示
+            else -> {
+                icon = AllIcons.FileTypes.Any
+                append(node?.toString() ?: "")
             }
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////

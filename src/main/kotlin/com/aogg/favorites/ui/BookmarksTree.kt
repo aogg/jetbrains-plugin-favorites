@@ -16,14 +16,19 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.util.Disposable
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileEvent
+import com.intellij.openapi.vfs.VirtualFileListener
+import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.ui.TreeUIHelper
 import com.intellij.ui.treeStructure.Tree
 import java.awt.event.ActionEvent
@@ -35,6 +40,7 @@ import java.util.Locale
 import javax.swing.AbstractAction
 import javax.swing.JComponent
 import javax.swing.KeyStroke
+import javax.swing.Timer
 import javax.swing.event.TreeExpansionEvent
 import javax.swing.event.TreeWillExpandListener
 import javax.swing.tree.DefaultMutableTreeNode
@@ -96,6 +102,9 @@ class DirNode(
     /** 子节点是否已懒加载（骨架子项 + 文件夹收藏的真实子项） */
     var childrenLoaded: Boolean = false
 
+    /** 骨架子项是否已物化（刷新时公共祖先/基准目录节点会立即物化一次，置位后展开懒加载不再重复追加，防同路径文件节点成对出现） */
+    var spineChildrenLoaded: Boolean = false
+
     /** 展开时是否读真实文件系统（文件夹收藏目录/真实目录=true；纯虚拟目录仅骨架子项） */
     val fsBacked: Boolean
         get() = bookmark != null || fromFs
@@ -139,13 +148,14 @@ class FileNode(
  * @param scope 所属作用域
  * @param listName 所属列表名
  * @param bookmark 行收藏
- * @param contentText 所在行文本（超长已截断；读取失败为 null，显示时回退收藏描述）
+ * @param contentText 所在行文本（超长已截断；「…」=后台异步加载中；null=空白行/读取失败，显示时回退收藏描述）。
+ *                    异步加载/文件变动刷新完成后原地更新该字段并 nodeChanged（不重建树，保持展开态）
  */
 class LineEntryNode(
     val scope: FavoriteScope,
     val listName: String,
     val bookmark: Bookmark,
-    val contentText: String?
+    var contentText: String?
 ) {
     /**
      * 灰色说明文本：行内容优先（超长已在构建时截断），读取失败回退收藏描述
@@ -288,6 +298,8 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  * 第二层之下按文件系统层级组织：
  * - 每个列表按收藏路径计算公共祖先目录，自上而下生成虚拟目录链（仅承载通向收藏项的路径）
  * - 行收藏(LINE)挂在其所在文件的文件节点下（同文件共用一个文件节点，行节点="行号: 行内容"）
+ *   行内容加载策略：EDT 只读已加载 Document（getCachedDocument），读不到先显示占位「…」再后台异步加载；
+ *   监听文件内容变更（保存/外部改动）防抖 ~500ms 后仅刷新受影响文件的行内容并原位更新节点（不整棵重建）
  * - 文件收藏(FILE)即文件节点本体；同路径 FILE+LINE 收藏合并为一个文件节点
  * - 文件夹收藏(FOLDER)为虚拟目录链上带收藏标记的目录节点，首次展开懒加载真实子文件/子文件夹
  *   （含未收藏项，深层逐级懒加载）；目录不存在/不可读显示缺失态（红叉）
@@ -346,6 +358,15 @@ class BookmarksTree(
         /** 读取行内容时的原始取样长度（先取样再压缩空白并按显示上限截断） */
         private const val LINE_READ_SAMPLE_LENGTH = 500
 
+        /** 行内容未加载完成时的占位文本（后台异步加载完成后替换为真实内容/描述兜底） */
+        private const val LINE_CONTENT_PENDING = "…"
+
+        /** 行内容随文件变动刷新的防抖毫秒数（连续保存/外部改动合并为一次刷新） */
+        private const val LINE_REFRESH_DEBOUNCE_MS = 500
+
+        /** 异步加载行内容的源文件大小上限（超过按读取失败处理回退收藏描述，避免后台加载超大文件） */
+        private const val MAX_LINE_SOURCE_FILE_LENGTH = 20L * 1024 * 1024
+
         /** 全部展开时的行数安全上限（防止在超大真实目录树上无限懒加载） */
         private const val MAX_EXPAND_ROWS = 10000
     }
@@ -354,6 +375,27 @@ class BookmarksTree(
 
     /** 当前各列表的文件系统骨架（key = spineKey(scope, listName)，refresh 时重建） */
     private var listSpines: Map<String, FavoritesListSpine> = emptyMap()
+
+    /** 行内容缓存：文件绝对路径（正斜杠规范）→（行号 → 行文本；null=空白行/读取失败，显示时回退收藏描述）。仅 EDT 访问 */
+    private val lineContentCache = HashMap<String, HashMap<Int, String?>>()
+
+    /** 进行中的异步行内容加载请求键（缓存键#行号，防同一位置重复调度后台加载） */
+    private val pendingLineLoadKeys = HashSet<String>()
+
+    /** 待防抖刷新行内容的文件绝对路径集合（EDT 访问） */
+    private val pendingLineRefreshPaths = LinkedHashSet<String>()
+
+    /** 行内容防抖刷新定时器（Swing Timer 到点在 EDT 执行，仅刷新受影响文件的行内容并 nodeChanged） */
+    private var lineRefreshTimer: Timer? = null
+
+    /** 行内容实时更新相关资源的注销句柄（注册到项目：项目关闭时停定时器并清空缓存/监听自动注销） */
+    private val lineContentDisposable = Disposable {
+        lineRefreshTimer?.stop()
+        lineRefreshTimer = null
+        pendingLineRefreshPaths.clear()
+        pendingLineLoadKeys.clear()
+        lineContentCache.clear()
+    }
 
     init {
         isRootVisible = false
@@ -405,6 +447,9 @@ class BookmarksTree(
         addTreeSelectionListener {
             previewSelectedLineBookmark()
         }
+
+        // 行内容实时更新：监听文件内容变更（保存/外部改动）防抖刷新，项目关闭时随 Disposer 注销
+        registerLineContentListener()
 
         refresh()
     }
@@ -519,6 +564,8 @@ class BookmarksTree(
         for (scopeChild in root.children()) {
             restoreExpansion(scopeChild as DefaultMutableTreeNode, expandedDirKeys)
         }
+        // 裁剪行内容缓存：仅保留当前树中行收藏仍引用的文件（避免内存无限增长）
+        pruneLineContentCache()
         // ////////////////  逻辑后  end  ///////////////////////////////////////////////
     }
 
@@ -1105,7 +1152,9 @@ class BookmarksTree(
         file != null && file.isValid && file.isDirectory
 
     /**
-     * 将骨架目录下的子项物化为树节点（目录条目在前、文件条目在后，保持收藏排序出现顺序）
+     * 将骨架目录下的子项物化为树节点（目录条目在前、文件条目在后，保持收藏排序出现顺序）。
+     * 幂等：同一目录节点只物化一次骨架子项（刷新时公共祖先/基准目录节点已立即物化过则跳过，
+     * 防止展开懒加载重复追加产生同路径成对文件节点）；缺失态目录（allowsChildren=false）不挂子项。
      *
      * @param parentTreeNode 挂载的树节点
      * @param scope 作用域
@@ -1120,6 +1169,12 @@ class BookmarksTree(
         spine: FavoritesListSpine,
         dirPath: String
     ) {
+        // ////////////////  校验参数：骨架子项只物化一次 + 缺失态目录不挂子项  start  ///////
+        val parentDir = parentTreeNode.userObject as? DirNode
+        if (parentDir != null && parentDir.spineChildrenLoaded) return
+        if (!parentTreeNode.allowsChildren) return
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
         // ////////////////  核心逻辑：目录条目→目录节点、文件条目→文件节点(+行子节点)  start
         for (entry in spine.childrenOf(dirPath)) {
             when (entry) {
@@ -1148,6 +1203,10 @@ class BookmarksTree(
             }
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // ////////////////  逻辑后：标记骨架子项已物化（展开懒加载不再重复追加）  start  //
+        parentDir?.spineChildrenLoaded = true
+        // ////////////////  逻辑后  end  /////////////////////////////////////////////
     }
 
     /**
@@ -1169,11 +1228,11 @@ class BookmarksTree(
         )
         val treeNode = DefaultMutableTreeNode(fileNode)
 
-        // ////////////////  核心逻辑：行收藏子节点（"行号: 行内容"）  start  //////////////
+        // ////////////////  核心逻辑：行收藏子节点（"行号: 行内容"，EDT 安全解析+异步兜底）  start
         for (lineBookmark in entry.lineBookmarks) {
             treeNode.add(
                 DefaultMutableTreeNode(
-                    LineEntryNode(scope, listName, lineBookmark, readLineContent(lineBookmark))
+                    LineEntryNode(scope, listName, lineBookmark, resolveLineContent(lineBookmark))
                 )
             )
         }
@@ -1182,41 +1241,248 @@ class BookmarksTree(
     }
 
     /**
-     * 读取行收藏所在行的文本（压缩空白；超长按显示上限截断；任何异常兜底返回 null，显示时回退收藏描述）
+     * 解析行收藏的行内容（EDT 安全，不读盘）：
+     * 1) 命中缓存直接返回；
+     * 2) 文件 Document 已加载（[FileDocumentManager.getCachedDocument]）时从 Document 读取并写缓存；
+     * 3) 均未命中（未打开/未加载/大文件/二进制）返回占位「…」并调度后台异步加载，
+     *    加载完成回 EDT 更新缓存与受影响节点（nodeChanged，不整棵重建，保持展开态）
      *
      * @param bookmark 行收藏
-     * @return 行文本（空白行为 null）或 null（读取失败）
+     * @return 行文本；「…」=异步加载中；null=空白行/读取失败（显示时回退收藏描述）
      */
-    private fun readLineContent(bookmark: Bookmark): String? {
+    private fun resolveLineContent(bookmark: Bookmark): String? {
         // ////////////////  校验参数  start  ///////////////////////////////////////////
         if (!bookmark.isLineBookmark() || bookmark.lineNumber < 0) return null
+        val cacheKey = lineCacheKey(bookmark) ?: return null
         // ////////////////  校验参数  end  /////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：VirtualFile→Document→目标行文本  start  ////////////
-        return try {
-            val file = resolveVirtualFile(bookmark) ?: return null
-            if (!file.isValid) return null
-            val document = FileDocumentManager.getInstance().getDocument(file) ?: return null
-            if (bookmark.lineNumber >= document.lineCount) return null
-            val lineStart = document.getLineStartOffset(bookmark.lineNumber)
-            val lineEnd = minOf(document.getLineEndOffset(bookmark.lineNumber), lineStart + LINE_READ_SAMPLE_LENGTH)
-            // 压缩空白保证树节点单行展示；超长截断加省略号
-            val raw = document.getText(TextRange(lineStart, lineEnd)).replace(Regex("\\s+"), " ").trim()
-            when {
-                raw.isEmpty() -> null
-                raw.length > MAX_LINE_TEXT_LENGTH -> raw.take(MAX_LINE_TEXT_LENGTH) + "…"
-                else -> raw
+        // ////////////////  分支一：命中缓存直接返回  start  /////////////////////////////
+        val lineCache = lineContentCache[cacheKey]
+        if (lineCache != null && lineCache.containsKey(bookmark.lineNumber)) {
+            return lineCache[bookmark.lineNumber]?.takeIf { it.isNotEmpty() }
+        }
+        // ////////////////  分支一  end  ///////////////////////////////////////////////
+
+        // ////////////////  分支二：仅从已加载 Document 读（getCachedDocument 不触盘）  ///
+        val document = resolveVirtualFile(bookmark)?.let { file ->
+            runCatching { FileDocumentManager.getInstance().getCachedDocument(file) }.getOrNull()
+        }
+        if (document == null) {
+            // 未加载：先显示占位，再交后台线程异步加载
+            scheduleLineContentLoad(bookmark, cacheKey)
+            return LINE_CONTENT_PENDING
+        }
+        val text = runCatching { extractLineText(document, bookmark.lineNumber) }.getOrNull()
+        lineCacheText(cacheKey, bookmark.lineNumber, text)
+        return text
+        // ////////////////  分支二  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 后台异步加载行内容（后台线程读动作内加载 Document；文件缺失/二进制/超大/行号越界按读取失败处理），
+     * 完成后回 EDT 写缓存并仅刷新受影响文件下的行收藏节点（不整棵重建，保持展开态）
+     *
+     * @param bookmark 行收藏
+     * @param cacheKey 缓存键（文件绝对路径）
+     */
+    private fun scheduleLineContentLoad(bookmark: Bookmark, cacheKey: String) {
+        // 同一文件同一行只调度一次（过滤输入等高频刷新下去重）
+        val requestKey = "$cacheKey#${bookmark.lineNumber}"
+        if (!pendingLineLoadKeys.add(requestKey)) return
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val text = runCatching {
+                ApplicationManager.getApplication().runReadAction<String> {
+                    if (project.isDisposed) return@runReadAction ""
+                    val file = resolveVirtualFile(bookmark) ?: return@runReadAction ""
+                    if (!file.isValid) return@runReadAction ""
+                    val tooLarge = runCatching { file.length > MAX_LINE_SOURCE_FILE_LENGTH }.getOrDefault(true)
+                    val binary = runCatching { file.fileType.isBinary }.getOrDefault(true)
+                    if (tooLarge || binary) return@runReadAction ""
+                    val document = FileDocumentManager.getInstance().getDocument(file) ?: return@runReadAction ""
+                    if (bookmark.lineNumber >= document.lineCount) return@runReadAction ""
+                    extractLineText(document, bookmark.lineNumber)
+                }
+            }.getOrDefault("")
+            ApplicationManager.getApplication().invokeLater {
+                pendingLineLoadKeys.remove(requestKey)
+                if (project.isDisposed) return@invokeLater
+                lineCacheText(cacheKey, bookmark.lineNumber, text.takeIf { it.isNotEmpty() })
+                refreshLineContentsForPath(cacheKey)
             }
-            // ////////////////  核心逻辑  end  ///////////////////////////////////////
-        } catch (e: Exception) {
-            // 异常兜底：返回 null，节点灰色文本回退用收藏描述
-            log.warn("读取行收藏内容失败：${bookmark.filePath}:${bookmark.lineNumber + 1}", e)
-            null
         }
     }
 
     /**
-     * 懒加载目录节点子项：骨架子项（虚拟目录链/文件/行收藏）必建；
+     * 刷新指定文件下全部行收藏节点的行内容（缓存/已加载 Document 优先，未命中异步兜底），
+     * 仅对受影响节点 nodeChanged（不整棵重建，保持展开态）
+     *
+     * @param cacheKey 文件绝对路径（正斜杠规范）
+     */
+    private fun refreshLineContentsForPath(cacheKey: String) {
+        // ////////////////  校验参数：模型存在才可遍历  start  ///////////////////////////
+        val treeModel = model as? DefaultTreeModel ?: return
+        val root = treeModel.root as? DefaultMutableTreeNode ?: return
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：收集受影响节点并原位更新  start  ////////////////////
+        val affected = mutableListOf<DefaultMutableTreeNode>()
+        walkTreeNodes(root) { node ->
+            val line = node.userObject as? LineEntryNode ?: return@walkTreeNodes
+            if (lineCacheKey(line.bookmark) == cacheKey) {
+                line.contentText = resolveLineContent(line.bookmark)
+                affected.add(node)
+            }
+        }
+        affected.forEach { treeModel.nodeChanged(it) }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 注册行内容实时更新监听：VirtualFileManager 的 contentChanged 覆盖保存与外部改动，
+     * fileDeleted 清理对应缓存；监听挂 [lineContentDisposable] 并注册到项目，项目关闭时自动注销
+     */
+    private fun registerLineContentListener() {
+        runCatching { Disposer.register(project, lineContentDisposable) }
+            .onFailure { log.warn("注册行内容资源注销句柄失败", it) }
+        runCatching {
+            VirtualFileManager.getInstance().addVirtualFileListener(object : VirtualFileListener {
+                override fun contentChanged(event: VirtualFileEvent) {
+                    if (project.isDisposed) return
+                    scheduleLineRefreshForPath(event.file.path)
+                }
+
+                override fun fileDeleted(event: VirtualFileEvent) {
+                    dropLineContentCache(event.file.path)
+                }
+            }, lineContentDisposable)
+        }.onFailure { log.warn("注册文件内容变更监听失败", it) }
+    }
+
+    /**
+     * 防抖调度行内容刷新：树中存在该文件的行收藏节点时记入待刷新集合并重置定时器，
+     * ~500ms 无新变更后仅刷新受影响文件的行内容（连续保存/外部改动合并为一次）
+     *
+     * @param path 变更文件的绝对路径（VFS 路径）
+     */
+    private fun scheduleLineRefreshForPath(path: String) {
+        if (!hasLineEntryForPath(path)) return
+        pendingLineRefreshPaths.add(path)
+        val timer = lineRefreshTimer ?: Timer(LINE_REFRESH_DEBOUNCE_MS).also {
+            it.isRepeats = false
+            it.addActionListener {
+                // Swing Timer 到点在 EDT 执行；pendingLineRefreshPaths 仅 EDT 访问
+                val paths = pendingLineRefreshPaths.toList()
+                pendingLineRefreshPaths.clear()
+                paths.forEach { refreshLineContentsForPath(it) }
+            }
+            lineRefreshTimer = it
+        }
+        timer.restart()
+    }
+
+    /**
+     * 树中是否存在指定文件的行收藏节点（无关文件的内容变更直接跳过，省去防抖与刷新开销）
+     *
+     * @param path 文件绝对路径（VFS 路径）
+     * @return true=存在
+     */
+    private fun hasLineEntryForPath(path: String): Boolean {
+        val root = (model as? DefaultTreeModel)?.root as? DefaultMutableTreeNode ?: return false
+        var found = false
+        walkTreeNodes(root) { node ->
+            val line = node.userObject as? LineEntryNode ?: return@walkTreeNodes
+            if (!found && lineCacheKey(line.bookmark) == path) found = true
+        }
+        return found
+    }
+
+    /**
+     * 文件删除时清理对应行内容缓存（避免无效缓存驻留内存）
+     *
+     * @param path 被删除文件的绝对路径（VFS 路径）
+     */
+    private fun dropLineContentCache(path: String) {
+        lineContentCache.remove(path)
+    }
+
+    /**
+     * 树刷新后裁剪行内容缓存：仅保留当前树中行收藏仍引用的文件（避免内存无限增长）
+     */
+    private fun pruneLineContentCache() {
+        val root = (model as? DefaultTreeModel)?.root as? DefaultMutableTreeNode ?: return
+        val referenced = HashSet<String>()
+        walkTreeNodes(root) { node ->
+            val line = node.userObject as? LineEntryNode ?: return@walkTreeNodes
+            lineCacheKey(line.bookmark)?.let { referenced.add(it) }
+        }
+        lineContentCache.keys.retainAll(referenced)
+    }
+
+    /**
+     * 写入行内容缓存（空串统一归一为 null，节点显示时回退收藏描述）
+     *
+     * @param cacheKey 缓存键（文件绝对路径）
+     * @param lineNumber 行号（0 基）
+     * @param text 行文本（空串/null 均存 null）
+     */
+    private fun lineCacheText(cacheKey: String, lineNumber: Int, text: String?) {
+        lineContentCache.getOrPut(cacheKey) { HashMap() }[lineNumber] = text?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 行内容缓存键：收藏路径换算成绝对路径并统一正斜杠（与 VFS 文件路径一致，供文件变动监听比对）
+     *
+     * @param bookmark 行收藏
+     * @return 缓存键；无法换算（无项目基准路径）返回 null
+     */
+    private fun lineCacheKey(bookmark: Bookmark): String? {
+        // ////////////////  校验参数  start  ///////////////////////////////////////////
+        if (bookmark.filePath.isBlank()) return null
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：绝对路径语义直用，项目作用域拼项目根  start  ///////////
+        return if (FavoritesTreePaths.isAbsolutePath(bookmark.filePath)) {
+            bookmark.filePath.replace('\\', '/')
+        } else {
+            project.basePath?.let { basePath -> File(basePath, bookmark.filePath).absolutePath.replace('\\', '/') }
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 从 Document 提取目标行文本（压缩空白保证树节点单行展示；超长按显示上限截断加省略号）
+     *
+     * @param document 已加载文档
+     * @param lineNumber 行号（0 基，越界抛异常由调用方兜底）
+     * @return 行文本（空白行为空串）
+     */
+    private fun extractLineText(document: Document, lineNumber: Int): String {
+        val lineStart = document.getLineStartOffset(lineNumber)
+        val lineEnd = minOf(document.getLineEndOffset(lineNumber), lineStart + LINE_READ_SAMPLE_LENGTH)
+        val raw = document.getText(TextRange(lineStart, lineEnd)).replace(Regex("\\s+"), " ").trim()
+        return when {
+            raw.isEmpty() -> ""
+            raw.length > MAX_LINE_TEXT_LENGTH -> raw.take(MAX_LINE_TEXT_LENGTH) + "…"
+            else -> raw
+        }
+    }
+
+    /**
+     * 深度优先遍历树节点（含自身，递归辅助；行内容原位更新/缓存裁剪共用）
+     *
+     * @param node 当前树节点
+     * @param action 节点访问动作
+     */
+    private inline fun walkTreeNodes(node: DefaultMutableTreeNode, action: (DefaultMutableTreeNode) -> Unit) {
+        action(node)
+        for (i in 0 until node.childCount) {
+            walkTreeNodes(node.getChildAt(i) as DefaultMutableTreeNode, action)
+        }
+    }
+
+    /**
+     * 懒加载目录节点子项：骨架子项（虚拟目录链/文件/行收藏）未物化时补建（[appendSpineChildren] 幂等，
+     * 刷新时已物化过的公共祖先/基准目录自动跳过，防重复节点）；
      * 文件夹收藏目录/真实目录再合并真实文件系统子项（收藏物化节点优先，同名真实子项跳过去重）
      *
      * @param treeNode 目录节点对应的树节点
