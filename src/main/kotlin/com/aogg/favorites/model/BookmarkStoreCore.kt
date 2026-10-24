@@ -14,8 +14,9 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * 列表模型约束：
  * - 助记符在本作用域内全局唯一（跨列表），跳转快捷键按助记符跨列表查找
- * - 默认列表 [Bookmark.DEFAULT_LIST_NAME] 不可删除/重命名
- * - 删除列表时其收藏全部并入默认列表
+ * - 默认列表 [Bookmark.DEFAULT_LIST_NAME] 不可删除/重命名，parentId 恒为顶级
+ * - 列表为可多层级嵌套的分组树（父子按 id 关联），删除分组时连同其后代分组级联删除，
+ *   被删分组内的收藏全部并入默认列表
  *
  * @param persistenceProvider 持久化提供器：懒加载首次访问时才解析真实存储，
  *                            便于测试环境先注入假存储再触发加载
@@ -400,7 +401,7 @@ class BookmarkStoreCore(private val persistenceProvider: () -> BookmarkPersisten
     }
 
     /**
-     * 新建列表
+     * 新建列表（顶级分组）
      *
      * @param name 列表名称（去空格后不能为空，且不能与现有列表重名）
      * @return 是否创建成功
@@ -418,7 +419,64 @@ class BookmarkStoreCore(private val persistenceProvider: () -> BookmarkPersisten
     }
 
     /**
-     * 重命名列表（默认列表不可重命名；其下所有收藏同步迁移）
+     * 在指定分组下新建子分组（名字仍全作用域唯一，沿用 hasList 同款校验；父子按 id 关联）
+     *
+     * @param parentName 父分组名（须已存在）
+     * @param newName 子分组名（去空格后不能为空，且不能与现有列表重名）
+     * @return 是否创建成功（父分组不存在/名字非法或重名返回 false）
+     */
+    fun createSubGroup(parentName: String, newName: String): Boolean {
+        ensureLoaded()
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return false
+        synchronized(lists) {
+            ensureDefaultListLocked()
+            val parent = lists.firstOrNull { it.name == parentName } ?: return false
+            if (lists.any { it.name == trimmed }) return false
+            lists.add(ListInfo(name = trimmed, parentId = parent.id))
+        }
+        saveToStorage()
+        return true
+    }
+
+    /**
+     * 获取指定父分组的直接子分组（保持存储出现顺序；parentId="" 返回顶级分组，含默认列表）
+     *
+     * @param parentId 父分组 id（""=顶级）
+     */
+    fun childrenOf(parentId: String): List<ListInfo> {
+        ensureLoaded()
+        synchronized(lists) {
+            ensureDefaultListLocked()
+            return lists.filter { it.parentId == parentId }
+        }
+    }
+
+    /**
+     * 获取分组的完整层级路径（如「父/子」，供弹窗与展示用）
+     *
+     * @param name 分组名（须已存在；环数据下沿链截断，绝不死循环）
+     * @return 层级路径；分组不存在时原样返回名称
+     */
+    fun fullPath(name: String): String {
+        ensureLoaded()
+        synchronized(lists) {
+            val target = lists.firstOrNull { it.name == name } ?: return name
+            val byId = lists.associateBy { it.id }
+            val parts = ArrayDeque<String>()
+            var cursor: ListInfo? = target
+            val visited = HashSet<String>()
+            while (cursor != null && visited.add(cursor.id)) {
+                parts.addFirst(cursor.name)
+                cursor = cursor.parentId.takeIf { it.isNotBlank() }?.let { byId[it] }
+            }
+            return parts.joinToString("/")
+        }
+    }
+
+    /**
+     * 重命名列表（默认列表不可重命名；其下所有收藏同步迁移；
+     * 父子关系按 id 关联，改名不影响自身与后代的层级位置）
      *
      * @return 是否重命名成功
      */
@@ -442,27 +500,59 @@ class BookmarkStoreCore(private val persistenceProvider: () -> BookmarkPersisten
     }
 
     /**
-     * 删除列表（默认列表不可删除；其收藏全部并入默认列表）
+     * 列表级联删除预览（删除前确认框展示用）：统计将连删的后代分组与并入默认列表的收藏数
      *
-     * @return 是否删除成功
+     * @param name 分组名
+     * @return 预览信息；分组不存在或为默认列表（不可删）返回 null
      */
-    fun deleteList(name: String): Boolean {
+    fun previewCascadeDelete(name: String): CascadeDeletePreview? {
         ensureLoaded()
-        if (name == Bookmark.DEFAULT_LIST_NAME) return false
+        if (name == Bookmark.DEFAULT_LIST_NAME) return null
         synchronized(lists) {
-            val index = lists.indexOfFirst { it.name == name }
-            if (index < 0) return false
-            lists.removeAt(index)
+            val target = lists.firstOrNull { it.name == name } ?: return null
+            val doomedIds = ListInfo.collectDescendantIds(lists, target.id) + target.id
+            val names = lists.filter { it.id in doomedIds }.map { it.name }
+            val moved = bookmarks.values.count { it.listName in names.toSet() }
+            return CascadeDeletePreview(groupNames = names, movedBookmarkCount = moved)
         }
-        bookmarks.values.filter { it.listName == name }.forEach { bm ->
+    }
+
+    /**
+     * 删除列表（级联，默认列表不可删除）：递归收集全部后代分组一并删除，
+     * 被删分组内的所有收藏并入默认列表「收藏」（收藏与列表名模型不变）
+     *
+     * @param name 分组名
+     * @return 级联删除结果（带删除分组数与并入收藏数，供提示展示）
+     */
+    fun deleteListCascade(name: String): ListDeleteResult {
+        ensureLoaded()
+        if (name == Bookmark.DEFAULT_LIST_NAME) return ListDeleteResult(success = false)
+        val deletedNames: List<String>
+        synchronized(lists) {
+            val target = lists.firstOrNull { it.name == name } ?: return ListDeleteResult(success = false)
+            val doomedIds = ListInfo.collectDescendantIds(lists, target.id) + target.id
+            deletedNames = lists.filter { it.id in doomedIds }.map { it.name }
+            lists.removeAll { it.id in doomedIds }
+        }
+        var moved = 0
+        val doomedNames = deletedNames.toSet()
+        bookmarks.values.filter { it.listName in doomedNames }.forEach { bm ->
             replaceBookmarkInternal(bm, bm.copy(listName = Bookmark.DEFAULT_LIST_NAME))
+            moved++
         }
         synchronized(lists) {
             ensureDefaultListLocked()
         }
         saveToStorage()
-        return true
+        return ListDeleteResult(success = true, deletedGroupNames = deletedNames, movedBookmarkCount = moved)
     }
+
+    /**
+     * 删除列表（级联语义的布尔快捷入口，默认列表不可删除；其与全部后代分组内的收藏并入默认列表）
+     *
+     * @return 是否删除成功
+     */
+    fun deleteList(name: String): Boolean = deleteListCascade(name).success
 
     /**
      * 将收藏移动到指定列表（同一作用域内移动）
@@ -539,7 +629,7 @@ class BookmarkStoreCore(private val persistenceProvider: () -> BookmarkPersisten
     // ==================== 持久化 ====================
 
     /**
-     * 从持久化存储加载收藏（旧数据无 listName 时自动归入默认列表）
+     * 从持久化存储加载收藏（旧数据无 listName 时自动归入默认列表；分组树结构归一见 [ListInfo.normalizeTree]）
      */
     private fun loadFromStorage() {
         val helper = persistenceProvider()
@@ -556,6 +646,13 @@ class BookmarkStoreCore(private val persistenceProvider: () -> BookmarkPersisten
                 }
             }
             ensureDefaultListLocked()
+            // ////////////////  分组树归一（迁移不丢数据）  start  ////////////////////////
+            // 旧数据补 id、坏 parentId（缺目标/指自己/成环）归顶级、默认列表强制顶级；
+            // 归一是确定性纯函数，不在此处立即落盘，随下一次保存自然持久化
+            val normalized = ListInfo.normalizeTree(lists.toList())
+            lists.clear()
+            lists.addAll(normalized)
+            // ////////////////  分组树归一  end  ///////////////////////////////////////
         }
 
         loadedBookmarks.forEach { bookmark ->

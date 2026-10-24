@@ -187,7 +187,7 @@ class GlobalBookmarkManager : ScopedBookmarkManager {
     override fun hasList(name: String): Boolean = core.hasList(name)
 
     /**
-     * 新建列表
+     * 新建列表（顶级分组）
      *
      * @param name 列表名称（去空格后不能为空，且不能与现有列表重名）
      * @return 是否创建成功
@@ -195,14 +195,43 @@ class GlobalBookmarkManager : ScopedBookmarkManager {
     override fun createList(name: String): Boolean = core.createList(name)
 
     /**
-     * 重命名列表（默认列表不可重命名；其下所有收藏同步迁移）
+     * 在指定分组下新建子分组（名字全局作用域唯一；父子按 id 关联）
+     *
+     * @param parentName 父分组名（须已存在）
+     * @param newName 子分组名（去空格后不能为空，且不能与现有列表重名）
+     * @return 是否创建成功
+     */
+    override fun createSubGroup(parentName: String, newName: String): Boolean = core.createSubGroup(parentName, newName)
+
+    /**
+     * 获取指定父分组的直接子分组（parentId="" 返回顶级分组，含默认列表）
+     */
+    override fun childrenOf(parentId: String): List<ListInfo> = core.childrenOf(parentId)
+
+    /**
+     * 获取分组的完整层级路径（如「父/子」；分组不存在时原样返回名称）
+     */
+    override fun fullPath(name: String): String = core.fullPath(name)
+
+    /**
+     * 重命名列表（默认列表不可重命名；其下所有收藏同步迁移；改名不影响层级）
      */
     override fun renameList(oldName: String, newName: String): Boolean = core.renameList(oldName, newName)
 
     /**
-     * 删除列表（默认列表不可删除；其收藏全部并入默认列表）
+     * 删除列表（级联删除全部后代分组，其收藏并入默认列表）
      */
     override fun deleteList(name: String): Boolean = core.deleteList(name)
+
+    /**
+     * 列表级联删除预览（确认框展示用；分组不存在或为默认列表返回 null）
+     */
+    override fun previewCascadeDelete(name: String): CascadeDeletePreview? = core.previewCascadeDelete(name)
+
+    /**
+     * 删除列表并返回级联删除详情（删除分组数/并入收藏数）
+     */
+    override fun deleteListCascade(name: String): ListDeleteResult = core.deleteListCascade(name)
 
     /**
      * 将收藏移动到指定列表（全局作用域内移动）

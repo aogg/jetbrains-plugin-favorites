@@ -13,8 +13,8 @@ import com.intellij.util.xmlb.XmlSerializerUtil
  *
  * 存储格式：
  * - anonymousBookmarks/mnemonicBookmarks：收藏数据（1.1.0 起 BookmarkData 增加 listName 字段）
- * - lists：收藏列表元信息（1.1.0 新增）
- * 兼容迁移：旧格式无 listName/lists，加载时缺失字段自动归入默认列表，不丢数据。
+ * - lists：收藏列表元信息（1.1.0 新增；1.5.0 起 ListData 增加 id/parentId 支持多层级分组树）
+ * 兼容迁移：旧格式无 listName/lists/id/parentId，加载时缺失字段自动取默认值并归一，不丢数据。
  */
 @State(
     name = "FavoritesBookmarks",
@@ -79,23 +79,27 @@ class BookmarkStorageHelper : PersistentStateComponent<BookmarkStorageHelper.Sta
     }
 
     /**
-     * 收藏列表元数据（用于序列化）
+     * 收藏列表元数据（用于序列化；1.5.0 起增加 id/parentId 支持多层级分组树）
+     * 兼容迁移：旧文件缺 id/parentId 字段时取默认值（""），加载侧由内核归一补 id/归顶级，不丢数据。
      */
     data class ListData(
         var name: String = "",
-        var sortType: String = SortType.ADDED.name
+        var sortType: String = SortType.ADDED.name,
+        var id: String = "",
+        var parentId: String = ""
     ) {
-        constructor() : this("", SortType.ADDED.name)
+        constructor() : this("", SortType.ADDED.name, "", "")
 
         fun toListInfo(): ListInfo {
-            // 未知排序值（异常数据/跨版本）时保守降级为 ADDED，不抛异常
+            // 未知排序值（异常数据/跨版本）时保守降级为 ADDED，不抛异常；
+            // 空 id 透传（""），加载侧由 ListInfo.normalizeTree 统一补 UUID
             val type = SortType.entries.firstOrNull { it.name == sortType } ?: SortType.ADDED
-            return ListInfo(name = name, sortType = type)
+            return ListInfo(name = name, sortType = type, id = id, parentId = parentId)
         }
 
         companion object {
             fun fromListInfo(info: ListInfo): ListData {
-                return ListData(name = info.name, sortType = info.sortType.name)
+                return ListData(name = info.name, sortType = info.sortType.name, id = info.id, parentId = info.parentId)
             }
         }
     }

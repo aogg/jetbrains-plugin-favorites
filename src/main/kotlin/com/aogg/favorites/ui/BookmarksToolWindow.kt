@@ -107,6 +107,10 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
                 createNewList(scope)
             }
 
+            override fun createSubGroup(scope: FavoriteScope, parentListName: String) {
+                createSubGroupIn(scope, parentListName)
+            }
+
             override fun renameList(scope: FavoriteScope, listName: String?) {
                 renameSelectedList(scope, listName)
             }
@@ -392,6 +396,29 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         }
     }
 
+    /**
+     * 新建子分组：在指定分组下创建子分组（名称仍全作用域唯一，父子按 id 关联）
+     */
+    private fun createSubGroupIn(scope: FavoriteScope, parentListName: String) {
+        val manager = managerFor(scope)
+        val name = Messages.showInputDialog(
+            project,
+            "请在「$parentListName」下输入子分组名称（加入「${scope.label}」）：",
+            "新建子分组",
+            Messages.getInformationIcon(),
+            "",
+            object : InputValidator {
+                override fun checkInput(inputString: String): Boolean =
+                    inputString.isNotBlank() && !manager.hasList(inputString.trim())
+
+                override fun canClose(inputString: String): Boolean = checkInput(inputString)
+            }
+        ) ?: return
+        if (manager.createSubGroup(parentListName, name)) {
+            refreshTreeOnly()
+        }
+    }
+
     private fun renameSelectedList(scope: FavoriteScope, listName: String?) {
         if (listName == null) {
             Messages.showInfoMessage(project, "请先在树中选中一个列表或列表中的收藏", "重命名列表")
@@ -423,6 +450,9 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         }
     }
 
+    /**
+     * 删除列表（级联，二次确认）：确认框列明将连删的子分组数与并入默认列表的收藏数
+     */
     private fun deleteSelectedList(scope: FavoriteScope, listName: String?) {
         if (listName == null) {
             Messages.showInfoMessage(project, "请先在树中选中一个列表", "删除列表")
@@ -433,12 +463,23 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             return
         }
         val manager = managerFor(scope)
-        val count = manager.getBookmarksByList(listName).size
-        val message = "确定要删除「${scope.label}」中的列表「$listName」吗？\n" +
-            "其中的 $count 个收藏将并入默认列表「${Bookmark.DEFAULT_LIST_NAME}」。"
+        val preview = manager.previewCascadeDelete(listName)
+        if (preview == null) {
+            Messages.showInfoMessage(project, "列表「$listName」不存在", "删除列表")
+            return
+        }
+        val message = if (preview.subGroupCount > 0) {
+            "确定要删除「${scope.label}」中的分组「$listName」吗？\n" +
+                "将连同其 ${preview.subGroupCount} 个子分组一起删除（共 ${preview.groupNames.size} 个分组），\n" +
+                "其中 ${preview.movedBookmarkCount} 条收藏将并入默认列表「${Bookmark.DEFAULT_LIST_NAME}」。"
+        } else {
+            "确定要删除「${scope.label}」中的列表「$listName」吗？\n" +
+                "其中的 ${preview.movedBookmarkCount} 条收藏将并入默认列表「${Bookmark.DEFAULT_LIST_NAME}」。"
+        }
         val result = Messages.showYesNoDialog(project, message, "删除列表", Messages.getQuestionIcon())
         if (result != Messages.YES) return
-        if (manager.deleteList(listName)) {
+        val deleteResult = manager.deleteListCascade(listName)
+        if (deleteResult.success) {
             afterDataChanged()
         }
     }

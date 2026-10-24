@@ -82,9 +82,24 @@ interface ScopedBookmarkManager {
     fun hasList(name: String): Boolean
 
     /**
-     * 新建列表
+     * 新建列表（顶级分组）
      */
     fun createList(name: String): Boolean
+
+    /**
+     * 在指定分组下新建子分组（名字全作用域唯一；父子按 id 关联）
+     */
+    fun createSubGroup(parentName: String, newName: String): Boolean
+
+    /**
+     * 获取指定父分组的直接子分组（parentId="" 返回顶级分组，含默认列表）
+     */
+    fun childrenOf(parentId: String): List<ListInfo>
+
+    /**
+     * 获取分组的完整层级路径（如「父/子」；分组不存在时原样返回名称）
+     */
+    fun fullPath(name: String): String
 
     /**
      * 重命名列表
@@ -92,9 +107,19 @@ interface ScopedBookmarkManager {
     fun renameList(oldName: String, newName: String): Boolean
 
     /**
-     * 删除列表（其收藏并入默认列表）
+     * 删除列表（级联删除全部后代分组，其收藏并入默认列表）
      */
     fun deleteList(name: String): Boolean
+
+    /**
+     * 列表级联删除预览（确认框展示用；分组不存在或为默认列表返回 null）
+     */
+    fun previewCascadeDelete(name: String): CascadeDeletePreview?
+
+    /**
+     * 删除列表并返回级联删除详情（删除分组数/并入收藏数）
+     */
+    fun deleteListCascade(name: String): ListDeleteResult
 
     /**
      * 将收藏移动到指定列表（同作用域内移动）

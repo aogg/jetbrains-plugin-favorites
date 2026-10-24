@@ -7,6 +7,7 @@ import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.model.ListInfo
 import com.aogg.favorites.model.MatchRule
 import com.aogg.favorites.model.RuleMatchManager
+import com.aogg.favorites.model.ScopedBookmarkManager
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
 import com.intellij.openapi.actionSystem.ActionManager
@@ -62,11 +63,12 @@ data class ScopeNode(
 }
 
 /**
- * 列表节点用户对象（树第二层）
+ * 列表节点用户对象（树第二层起，1.5.0 起可多层级嵌套的分组节点）
+ * 子节点 = [子分组节点（递归）..., 自身收藏的文件系统骨架树]
  *
  * @param scope 列表所属作用域（列表操作按该作用域执行）
- * @param info 列表元信息
- * @param totalCount 该列表收藏总数（徽标展示）
+ * @param info 列表元信息（父子关系按 info.id/info.parentId 关联）
+ * @param totalCount 该分组自身收藏总数（徽标展示，不含子分组内收藏）
  */
 data class BookmarkListNode(
     val scope: FavoriteScope,
@@ -295,9 +297,10 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
 
 /**
  * 收藏树组件（1.3.0 PhpStorm 风格树状视图）：
- * 第一层=作用域（项目收藏/全局收藏，始终显示+总数徽标），第二层=列表，
- * 第二层之下按文件系统层级组织：
- * - 每个列表按收藏路径计算公共祖先目录，自上而下生成虚拟目录链（仅承载通向收藏项的路径）
+ * 第一层=作用域（项目收藏/全局收藏，始终显示+总数徽标），第二层起=分组树（1.5.0 起
+ * 列表升级为可多层级嵌套的分组：分组节点子节点 = 子分组节点（递归）+ 自身收藏的文件系统骨架树），
+ * 分组节点之下按文件系统层级组织：
+ * - 每个分组按自身收藏路径计算公共祖先目录，自上而下生成虚拟目录链（仅承载通向收藏项的路径）
  * - 行收藏(LINE)挂在其所在文件的文件节点下（同文件共用一个文件节点，行节点="行号: 行内容"）
  *   行内容加载策略：EDT 只读已加载 Document（getCachedDocument），读不到先显示占位「…」再后台异步加载；
  *   监听文件内容变更（保存/外部改动）防抖 ~500ms 后仅刷新受影响文件的行内容并原位更新节点（不整棵重建）
@@ -314,11 +317,13 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  * 交互：
  * - Enter / 双击 = 跳转（行→编辑器定位；文件→打开；文件夹→Project 视图选中；未收藏真实节点同样可跳转）
  * - F2 = 编辑描述、Del = 删除（通过 [Interactions] 回调到面板实现；未收藏真实节点收藏类操作不可用）
- * - 右键菜单：跳转/编辑描述/设置助记符/移动到列表(按作用域分组)/列表CRUD/删除收藏 + 规则匹配菜单
+ * - 右键菜单：跳转/编辑描述/设置助记符/移动到列表(按作用域分组、按分组层级嵌套)/分组CRUD
+ *   （分组节点=新建子分组；选中默认列表或作用域节点=新建顶级列表；删除分组级联连删子分组）/删除收藏 + 规则匹配菜单
  * - 选中行收藏时预览打开文件但不抢焦点（openFile(file, false)）
  * - 装 TreeSpeedSearch（TreeUIHelper.installTreeSpeedSearch），各节点 toString 均参与匹配
- * - 搜索过滤时作用域名/列表名/文件名/路径/描述/规则名/条目文本均参与匹配，过滤后虚拟目录链按命中项重建
- * - 刷新（含过滤）保留已展开目录的展开状态；作用域/列表/规则根/规则层级始终展开
+ * - 搜索过滤时作用域名/分组名/文件名/路径/描述/规则名/条目文本均参与匹配，
+ *   分组名命中放行该分组整棵子树，过滤后虚拟目录链按命中项重建
+ * - 刷新（含过滤）保留已展开目录的展开状态；作用域/分组层级/规则根/规则层级始终展开
  */
 class BookmarksTree(
     private val project: Project,
@@ -334,6 +339,7 @@ class BookmarksTree(
         fun setMnemonicForSelected()
         fun moveSelectedTo(scope: FavoriteScope, listName: String)
         fun createList(scope: FavoriteScope)
+        fun createSubGroup(scope: FavoriteScope, parentListName: String)
         fun renameList(scope: FavoriteScope, listName: String?)
         fun deleteList(scope: FavoriteScope, listName: String?)
 
@@ -484,70 +490,9 @@ class BookmarksTree(
             // 作用域名命中过滤词时，该作用域整体放行（列表与收藏不再逐项过滤）
             val scopeMatches = query.isEmpty() || scope.label.lowercase(Locale.ROOT).contains(query)
 
-            // ////////////////  第二层：作用域下的列表  start  //////////////////////////
-            for (listInfo in manager.getLists()) {
-                val allBookmarks = manager.getBookmarksByList(listInfo.name)
-                val listMatches = scopeMatches || listInfo.name.lowercase(Locale.ROOT).contains(query)
-                val visibleBookmarks = if (query.isEmpty() || listMatches) {
-                    allBookmarks
-                } else {
-                    allBookmarks.filter { bookmarkMatches(it, query) }
-                }
-                // 过滤中且本列表无命中时隐藏该列表（不过滤时列表始终显示）
-                if (query.isNotEmpty() && !listMatches && visibleBookmarks.isEmpty()) continue
-
-                val listNode = DefaultMutableTreeNode(BookmarkListNode(scope, listInfo, allBookmarks.size))
-
-                // ////////////////  第三层起：文件系统风格树（按命中收藏重建骨架）  start  //
-                val spine = FavoritesListSpine.build(scope, listInfo.name, visibleBookmarks)
-                spines[spineKey(scope, listInfo.name)] = spine
-                if (spine.commonAncestorPath.isEmpty()) {
-                    // ////////////////  基准目录自身带文件夹收藏（如收藏了项目根）时物化为顶层节点  //
-                    val baseBookmark = spine.dirBookmarkAt("")
-                    if (baseBookmark != null) {
-                        val baseName = if (scope == FavoriteScope.GLOBAL) {
-                            "/"
-                        } else {
-                            project.basePath?.substringAfterLast('/') ?: "."
-                        }
-                        val baseDir = DirNode(
-                            scope = scope,
-                            listName = listInfo.name,
-                            path = "",
-                            name = baseName,
-                            bookmark = baseBookmark,
-                            fromFs = false,
-                            missing = !isReadableDirectory(resolveNodePath(scope, ""))
-                        )
-                        val baseTreeNode = DefaultMutableTreeNode(baseDir, !baseDir.missing)
-                        appendSpineChildren(baseTreeNode, scope, listInfo.name, spine, "")
-                        listNode.add(baseTreeNode)
-                    } else {
-                        // 公共祖先即作用域基准目录（项目根/文件系统根）：骨架子项直接挂列表节点
-                        appendSpineChildren(listNode, scope, listInfo.name, spine, "")
-                    }
-                    // ////////////////  基准目录  end  /////////////////////////////////////
-                } else {
-                    // 公共祖先目录自身作为顶层目录节点（保证文件始终有上级文件夹层级）
-                    val commonBookmark = spine.dirBookmarkAt(spine.commonAncestorPath)
-                    val commonDir = DirNode(
-                        scope = scope,
-                        listName = listInfo.name,
-                        path = spine.commonAncestorPath,
-                        name = spine.commonAncestorPath.substringAfterLast('/'),
-                        bookmark = commonBookmark,
-                        fromFs = false,
-                        missing = commonBookmark != null &&
-                            !isReadableDirectory(resolveNodePath(scope, spine.commonAncestorPath))
-                    )
-                    // 缺失态目录不挂子节点（叶子+红叉）
-                    val commonTreeNode = DefaultMutableTreeNode(commonDir, !commonDir.missing)
-                    appendSpineChildren(commonTreeNode, scope, listInfo.name, spine, spine.commonAncestorPath)
-                    listNode.add(commonTreeNode)
-                }
-                // ////////////////  第三层起  end  ///////////////////////////////////////
-
-                scopeNode.add(listNode)
+            // ////////////////  第二层：作用域下的分组树（顶级分组递归嵌套）  start  ////////
+            for (topInfo in manager.childrenOf(ListInfo.ROOT_PARENT_ID)) {
+                buildListSubtree(scopeNode, scope, topInfo, manager, query, scopeMatches, spines)
             }
             // ////////////////  第二层  end  ///////////////////////////////////////////
 
@@ -568,6 +513,107 @@ class BookmarksTree(
         // 裁剪行内容缓存：仅保留当前树中行收藏仍引用的文件（避免内存无限增长）
         pruneLineContentCache()
         // ////////////////  逻辑后  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 构建单个分组子树（递归）：分组节点的子节点 = [子分组节点（递归）..., 自身收藏的文件系统骨架树]
+     *
+     * 搜索过滤：分组名命中时放行该分组整棵子树（含后代分组与收藏，不再逐项过滤），
+     * 否则按命中项过滤；过滤中且分组名未命中、自身收藏与全部后代均无命中时该分组整体隐藏
+     * （不过滤时分组始终显示）。
+     *
+     * @param parentNode 挂载父节点（作用域节点或上级分组节点）
+     * @param scope 所属作用域
+     * @param info 当前分组元信息
+     * @param manager 分组所在作用域的管理器
+     * @param query 过滤关键字（小写；空串表示不过滤）
+     * @param subtreePass 父级是否已放行整棵子树（作用域名/上级分组名命中时为 true）
+     * @param spines 骨架缓存出口（key = spineKey(scope, listName)，refresh 时重建）
+     * @return true=已挂载分组节点（false=过滤后无命中，未挂载）
+     */
+    private fun buildListSubtree(
+        parentNode: DefaultMutableTreeNode,
+        scope: FavoriteScope,
+        info: ListInfo,
+        manager: ScopedBookmarkManager,
+        query: String,
+        subtreePass: Boolean,
+        spines: MutableMap<String, FavoritesListSpine>
+    ): Boolean {
+        // ////////////////  准备数据：自身收藏 + 过滤放行判定  start  //////////////////
+        val allBookmarks = manager.getBookmarksByList(info.name)
+        val selfPass = subtreePass || info.name.lowercase(Locale.ROOT).contains(query)
+        val visibleBookmarks = if (selfPass) allBookmarks else allBookmarks.filter { bookmarkMatches(it, query) }
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // 徽标仍显示自身收藏数（不含子分组内收藏）
+        val listNode = DefaultMutableTreeNode(BookmarkListNode(scope, info, allBookmarks.size))
+
+        // ////////////////  核心逻辑一：子分组节点（递归，先于自身收藏骨架）  start  //////
+        var hasVisibleChild = false
+        for (child in manager.childrenOf(info.id)) {
+            if (buildListSubtree(listNode, scope, child, manager, query, selfPass, spines)) {
+                hasVisibleChild = true
+            }
+        }
+        // ////////////////  核心逻辑一  end  ////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：自身收藏的文件系统骨架树（按命中收藏重建）  start //
+        val spine = FavoritesListSpine.build(scope, info.name, visibleBookmarks)
+        spines[spineKey(scope, info.name)] = spine
+        if (spine.commonAncestorPath.isEmpty()) {
+            // ////////////////  基准目录自身带文件夹收藏（如收藏了项目根）时物化为顶层节点  //
+            val baseBookmark = spine.dirBookmarkAt("")
+            if (baseBookmark != null) {
+                val baseName = if (scope == FavoriteScope.GLOBAL) {
+                    "/"
+                } else {
+                    project.basePath?.substringAfterLast('/') ?: "."
+                }
+                val baseDir = DirNode(
+                    scope = scope,
+                    listName = info.name,
+                    path = "",
+                    name = baseName,
+                    bookmark = baseBookmark,
+                    fromFs = false,
+                    missing = !isReadableDirectory(resolveNodePath(scope, ""))
+                )
+                val baseTreeNode = DefaultMutableTreeNode(baseDir, !baseDir.missing)
+                appendSpineChildren(baseTreeNode, scope, info.name, spine, "")
+                listNode.add(baseTreeNode)
+            } else {
+                // 公共祖先即作用域基准目录（项目根/文件系统根）：骨架子项直接挂分组节点
+                appendSpineChildren(listNode, scope, info.name, spine, "")
+            }
+            // ////////////////  基准目录  end  /////////////////////////////////////
+        } else {
+            // 公共祖先目录自身作为顶层目录节点（保证文件始终有上级文件夹层级）
+            val commonBookmark = spine.dirBookmarkAt(spine.commonAncestorPath)
+            val commonDir = DirNode(
+                scope = scope,
+                listName = info.name,
+                path = spine.commonAncestorPath,
+                name = spine.commonAncestorPath.substringAfterLast('/'),
+                bookmark = commonBookmark,
+                fromFs = false,
+                missing = commonBookmark != null &&
+                    !isReadableDirectory(resolveNodePath(scope, spine.commonAncestorPath))
+            )
+            // 缺失态目录不挂子节点（叶子+红叉）
+            val commonTreeNode = DefaultMutableTreeNode(commonDir, !commonDir.missing)
+            appendSpineChildren(commonTreeNode, scope, info.name, spine, spine.commonAncestorPath)
+            listNode.add(commonTreeNode)
+        }
+        // ////////////////  核心逻辑二  end  ////////////////////////////////////////
+
+        // ////////////////  逻辑后：过滤后无命中时整体隐藏  start  ////////////////////
+        if (query.isNotEmpty() && !selfPass && visibleBookmarks.isEmpty() && !hasVisibleChild) {
+            return false
+        }
+        parentNode.add(listNode)
+        return true
+        // ////////////////  逻辑后  end  ///////////////////////////////////////////
     }
 
     /**
@@ -689,8 +735,9 @@ class BookmarksTree(
 
     /**
      * 获取当前选中上下文对应的列表（带作用域）：
-     * 选中列表节点→该列表；选中带收藏的节点→其所属列表；
-     * 纯虚拟目录/真实未收藏节点→null（避免 Del 等列表操作被误触发）
+     * 选中分组节点→该分组自身；选中分组内收藏/目录节点→沿父链向上最近的所属分组
+     * （1.5.0 嵌套分组下即"所选项自身所在分组"）；
+     * 作用域节点/纯虚拟目录/真实未收藏节点→null（避免 Del 等列表操作被误触发）
      */
     fun getSelectedList(): ScopedList? {
         // ////////////////  校验参数：仅列表节点或带收藏节点向上归属列表  start  ///////////
@@ -906,20 +953,38 @@ class BookmarksTree(
             // ////////////////  未收藏真实/容器节点  end  /////////////////////////////////
         }
 
-        group.add(object : AnAction("新建列表", "新建一个收藏列表", null) {
-            override fun actionPerformed(e: AnActionEvent) {
-                interactions.createList(listScope)
-            }
-        })
+        // ////////////////  分组CRUD：分组节点=新建子分组；默认列表/其它上下文=新建顶级列表  //
+        val directListNode = (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? BookmarkListNode
+        if (directListNode != null && directListNode.info.name != Bookmark.DEFAULT_LIST_NAME) {
+            group.add(object : AnAction(
+                "新建子分组",
+                "在「${directListNode.info.name}」下新建子分组（名称全作用域唯一）",
+                null
+            ) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.createSubGroup(listScope, directListNode.info.name)
+                }
+            })
+        } else {
+            group.add(object : AnAction("新建列表", "新建一个顶级收藏列表", null) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.createList(listScope)
+                }
+            })
+        }
 
         if (selectedList != null) {
-            group.add(object : AnAction("重命名列表", "重命名选中的列表（默认列表不可重命名）", null) {
+            group.add(object : AnAction("重命名列表", "重命名选中的列表（默认列表不可重命名；改名不影响层级）", null) {
                 override fun actionPerformed(e: AnActionEvent) {
                     interactions.renameList(selectedList.scope, selectedList.name)
                 }
             })
             if (selectedList.name != Bookmark.DEFAULT_LIST_NAME) {
-                group.add(object : AnAction("删除列表", "删除选中的列表，其收藏并入默认列表", null) {
+                group.add(object : AnAction(
+                    "删除列表",
+                    "删除选中的分组（其子分组一并删除，组内收藏并入默认列表）",
+                    null
+                ) {
                     override fun actionPerformed(e: AnActionEvent) {
                         interactions.deleteList(selectedList.scope, selectedList.name)
                     }
@@ -942,7 +1007,7 @@ class BookmarksTree(
     }
 
     /**
-     * 构建"移动到列表▸"子菜单（按作用域分组展示所有列表，当前所在列表置灰）
+     * 构建"移动到列表▸"子菜单（按作用域分组，组内按分组层级嵌套展示，当前所在列表置灰）
      *
      * - 同作用域列表：普通列表移动；
      * - 跨作用域列表：调用转移 API（路径转换+助记符降级规则由 FavoritesTransferService 处理）。
@@ -951,27 +1016,68 @@ class BookmarksTree(
         val group = DefaultActionGroup("移动到列表", true)
         val current = selectedBookmarks.firstOrNull()
 
-        // ////////////////  按作用域分组：每组一个子菜单  start  /////////////////////////
+        // ////////////////  按作用域分组：组内按分组层级嵌套  start  /////////////////////
         for (scope in FavoriteScope.entries) {
+            val manager = managerFor(scope)
             val scopeGroup = DefaultActionGroup(scope.label, true)
-            for (info in managerFor(scope).getLists()) {
-                val targetName = info.name
-                scopeGroup.add(object : AnAction(targetName, "移动到「${scope.label}」列表「$targetName」", null) {
-                    override fun actionPerformed(e: AnActionEvent) {
-                        interactions.moveSelectedTo(scope, targetName)
-                    }
-
-                    override fun update(e: AnActionEvent) {
-                        // 当前所在（作用域+列表）置灰
-                        e.presentation.isEnabled =
-                            !(current != null && current.scope == scope && current.bookmark.listName == targetName)
-                    }
-                })
-            }
+            appendMoveToListActions(scopeGroup, scope, manager, ListInfo.ROOT_PARENT_ID, current)
             group.add(scopeGroup)
         }
         // ////////////////  按作用域分组  end  /////////////////////////////////////////
         return group
+    }
+
+    /**
+     * 递归追加「移动到列表」目标项（按分组层级嵌套 DefaultActionGroup）：
+     * - 叶子分组：普通菜单项；
+     * - 含子分组的分组：子菜单（首项=移动到本分组，其后为各子分组子菜单）；
+     * - 当前所在（作用域+列表）置灰语义保持不变。
+     *
+     * @param parentGroup 挂载的动作组
+     * @param scope 目标作用域
+     * @param manager 目标作用域管理器
+     * @param parentId 当前层级的父分组 id（""=顶级）
+     * @param current 首个选中收藏（当前所在列表置灰用；null=不置灰）
+     */
+    private fun appendMoveToListActions(
+        parentGroup: DefaultActionGroup,
+        scope: FavoriteScope,
+        manager: ScopedBookmarkManager,
+        parentId: String,
+        current: ScopedBookmark?
+    ) {
+        for (info in manager.childrenOf(parentId)) {
+            val targetName = info.name
+            val children = manager.childrenOf(info.id)
+            if (children.isEmpty()) {
+                parentGroup.add(buildMoveToListAction(scope, manager, targetName, current))
+            } else {
+                val subGroup = DefaultActionGroup(targetName, true)
+                subGroup.add(buildMoveToListAction(scope, manager, targetName, current))
+                appendMoveToListActions(subGroup, scope, manager, info.id, current)
+                parentGroup.add(subGroup)
+            }
+        }
+    }
+
+    /**
+     * 构建单个「移动到列表」目标项（描述带完整层级路径；当前所在列表置灰）
+     */
+    private fun buildMoveToListAction(
+        scope: FavoriteScope,
+        manager: ScopedBookmarkManager,
+        targetName: String,
+        current: ScopedBookmark?
+    ): AnAction = object : AnAction(targetName, "移动到「${scope.label}」${manager.fullPath(targetName)}", null) {
+        override fun actionPerformed(e: AnActionEvent) {
+            interactions.moveSelectedTo(scope, targetName)
+        }
+
+        override fun update(e: AnActionEvent) {
+            // 当前所在（作用域+列表）置灰
+            e.presentation.isEnabled =
+                !(current != null && current.scope == scope && current.bookmark.listName == targetName)
+        }
     }
 
     /**
