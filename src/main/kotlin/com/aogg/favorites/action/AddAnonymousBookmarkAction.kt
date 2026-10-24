@@ -8,7 +8,9 @@ import com.aogg.favorites.model.FavoritesScopeResolver
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
@@ -24,30 +26,48 @@ import java.util.*
  * - 否则弹出「项目收藏/全局收藏」二选一（默认高亮上次使用的作用域，选择后记住），
  *   加入 GLOBAL 时写入绝对路径；项目外位置只能加入 GLOBAL；
  * - 项目视图多选批量：只弹一次选择，全部加入同一作用域。
+ *
+ * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
+ * 固定作用域入口（如原生 ToggleBookmark 委托、Ctrl+点击行号区手势）不弹作用域选择，
+ * 直接按指定作用域（当前项目）执行；右键菜单等原入口行为不变。
  */
-class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名收藏", null) {
+class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名收藏", null), ScopedAddAction {
 
     override fun actionPerformed(e: AnActionEvent) {
+        handleAction(e, fixedScope = null)
+    }
+
+    /**
+     * 固定作用域执行入口（原生动作接管路径专用）：不弹作用域二选一，直接按 [scope] 执行
+     */
+    override fun performWithFixedScope(e: AnActionEvent, scope: FavoriteScope) {
+        handleAction(e, fixedScope = scope)
+    }
+
+    /**
+     * 统一入口：按上下文收集目标位置后处理（fixedScope 为空时保持原作用域选择行为）
+     */
+    private fun handleAction(e: AnActionEvent, fixedScope: FavoriteScope?) {
         val project = e.project ?: return
 
         // 尝试从编辑器获取位置
         val editor = e.getData(CommonDataKeys.EDITOR)
         if (editor != null) {
-            handleEditorContext(project, editor)
+            handleEditorContext(project, editor, fixedScope)
             return
         }
 
         // 尝试从项目窗口获取文件/文件夹
         val virtualFiles = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)
         if (virtualFiles != null && virtualFiles.isNotEmpty()) {
-            handleProjectContext(project, virtualFiles)
+            handleProjectContext(project, virtualFiles, fixedScope)
             return
         }
 
         // 尝试从标签页右键菜单获取文件（EditorTabPopupMenu）
         val virtualFile = e.getData(CommonDataKeys.VIRTUAL_FILE)
         if (virtualFile != null) {
-            handleFileContext(project, virtualFile, editor)
+            handleFileContext(project, virtualFile, editor, fixedScope)
             return
         }
 
@@ -55,7 +75,7 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
         val fileEditorManager = FileEditorManager.getInstance(project)
         val selectedFiles = fileEditorManager.selectedFiles
         if (selectedFiles.isNotEmpty()) {
-            handleFileContext(project, selectedFiles[0], editor)
+            handleFileContext(project, selectedFiles[0], editor, fixedScope)
             return
         }
 
@@ -69,37 +89,37 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
     /**
      * 处理编辑器上下文（代码行收藏）
      */
-    private fun handleEditorContext(project: Project, editor: Editor) {
+    private fun handleEditorContext(project: Project, editor: Editor, fixedScope: FavoriteScope?) {
         val document = editor.document
         val currentOffset = editor.caretModel.offset
         val lineNumber = document.getLineNumber(currentOffset)
 
-        val virtualFile = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance()
+        val virtualFile = FileDocumentManager.getInstance()
             .getFile(document) ?: return
 
         // 构造行收藏目标位置（项目外文件 relativePath 为 null，只能加入全局收藏）
         val location = AddActionSupport.locationOf(project, virtualFile, lineNumber)
-        processLocations(project, listOf(location.copy(type = BookmarkType.LINE)), lineMode = true)
+        processLocations(project, listOf(location.copy(type = BookmarkType.LINE)), lineMode = true, fixedScope = fixedScope)
     }
 
     /**
      * 处理项目窗口上下文（文件/文件夹收藏，支持多选批量）
      */
-    private fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>) {
+    private fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>, fixedScope: FavoriteScope?) {
         val locations = virtualFiles.map { AddActionSupport.locationOf(project, it, -1) }
-        processLocations(project, locations, lineMode = false)
+        processLocations(project, locations, lineMode = false, fixedScope = fixedScope)
     }
 
     /**
      * 处理文件上下文（标签页收藏）
      */
-    private fun handleFileContext(project: Project, virtualFile: VirtualFile, editor: Editor?) {
+    private fun handleFileContext(project: Project, virtualFile: VirtualFile, editor: Editor?, fixedScope: FavoriteScope?) {
         if (editor != null) {
             // 如果有编辑器，收藏当前行
-            handleEditorContext(project, editor)
+            handleEditorContext(project, editor, fixedScope)
         } else {
             // 否则收藏文件
-            processLocations(project, listOf(AddActionSupport.locationOf(project, virtualFile, -1)), lineMode = false)
+            processLocations(project, listOf(AddActionSupport.locationOf(project, virtualFile, -1)), lineMode = false, fixedScope = fixedScope)
         }
     }
 
@@ -107,8 +127,14 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
      * 统一处理目标位置集合：先按切换语义拆分"已存在→移除"与"待新增"，再决定是否弹作用域选择
      *
      * @param lineMode true=编辑器行上下文（切换检测不限匿名/助记符）；false=文件/文件夹上下文（仅检测匿名收藏）
+     * @param fixedScope 非空时直接按该作用域写入（不弹选择）；null 时弹作用域二选一并记住选择
      */
-    private fun processLocations(project: Project, locations: List<AddActionSupport.PendingLocation>, lineMode: Boolean) {
+    private fun processLocations(
+        project: Project,
+        locations: List<AddActionSupport.PendingLocation>,
+        lineMode: Boolean,
+        fixedScope: FavoriteScope? = null
+    ) {
         // ////////////////  校验参数  start  //////////////////////////////////////////
         if (locations.isEmpty()) return
         // 历史行为：行上下文移除该行全部收藏；文件/文件夹上下文仅切换匿名收藏
@@ -135,7 +161,11 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：有待新增 → 弹作用域二选一（批量只弹一次）  start /////
+        // ////////////////  核心逻辑：固定作用域 → 直接写入；否则弹作用域二选一  start  ///
+        if (fixedScope != null) {
+            performAdd(project, fixedScope, candidates, toRemove, lineMode)
+            return
+        }
         AddScopeChooser.chooseScope(project) { scope ->
             performAdd(project, scope, candidates, toRemove, lineMode)
         }
@@ -223,5 +253,53 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
             (e.getData(CommonDataKeys.EDITOR) != null ||
                 !e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY).isNullOrEmpty())
         e.presentation.isEnabledAndVisible = hasContext
+    }
+
+    companion object {
+
+        private val log = Logger.getInstance(AddAnonymousBookmarkAction::class.java)
+
+        /**
+         * gutter 手势入口（Ctrl/⌘+点击行号区/图标区）：把编辑器指定行切换加入/移出「当前项目」匿名收藏
+         *
+         * - 固定当前项目作用域，不弹作用域二选一（原生书签手势接管语义）；
+         * - 切换语义与 F11 一致：该行已有收藏（任意类型/作用域）→ 全部移除；否则加入项目收藏；
+         * - 由 FavoritesGutterGestureListener 调用；任何一步失败仅记日志。
+         *
+         * @param project 当前项目
+         * @param editor 事件所在编辑器
+         * @param lineNumber 点击位置对应的 0 基行号
+         */
+        @JvmStatic
+        fun toggleProjectLineBookmark(project: Project, editor: Editor, lineNumber: Int) {
+            runCatching {
+                // ////////////////  校验参数：行号与文件  start  /////////////////////////
+                if (lineNumber < 0 || lineNumber >= editor.document.lineCount) return
+                val virtualFile = FileDocumentManager.getInstance().getFile(editor.document) ?: return
+                // ////////////////  校验参数  end  /////////////////////////////////////
+
+                // ////////////////  核心逻辑：项目外位置提示后直接返回  start  /////////////
+                val location = AddActionSupport.locationOf(project, virtualFile, lineNumber)
+                    .copy(type = BookmarkType.LINE)
+                if (location.relativePath == null) {
+                    Messages.showInfoMessage(
+                        project,
+                        "当前文件在项目目录之外，无法加入「当前项目」收藏。",
+                        "添加收藏失败"
+                    )
+                    return
+                }
+                // ////////////////  核心逻辑  end  /////////////////////////////////////
+
+                // ////////////////  核心逻辑：固定项目作用域切换  start  ///////////////////
+                AddAnonymousBookmarkAction().processLocations(
+                    project,
+                    listOf(location),
+                    lineMode = true,
+                    fixedScope = FavoriteScope.PROJECT
+                )
+                // ////////////////  核心逻辑  end  /////////////////////////////////////
+            }.onFailure { log.warn("gutter 手势切换当前项目匿名收藏失败（忽略）", it) }
+        }
     }
 }

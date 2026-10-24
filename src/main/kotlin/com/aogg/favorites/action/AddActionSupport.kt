@@ -6,9 +6,29 @@ import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.model.GlobalBookmarkManager
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.ui.ScopedBookmark
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import java.io.File
+
+/**
+ * 「固定作用域」执行契约（内部，1.4.x 原生书签快捷键接管新增）
+ *
+ * 实现者：添加类收藏动作（[AddAnonymousBookmarkAction]/[AddMnemonicBookmarkAction]）。
+ * - 原生书签快捷键接管路径（DelegateToFavoritesAction）固定为当前项目作用域，
+ *   直接执行、不弹 [AddScopeChooser] 作用域二选一；
+ * - 右键菜单等原入口仍走作用域选择（默认高亮并记住上次选择），行为不变。
+ */
+interface ScopedAddAction {
+
+    /**
+     * 以固定作用域执行添加/切换（原生动作接管路径专用）
+     *
+     * @param e 动作事件（委托动作已透传原数据上下文，编辑器/项目视图等上下文可用）
+     * @param scope 固定作用域（接管路径固定为 [FavoriteScope.PROJECT]）
+     */
+    fun performWithFixedScope(e: AnActionEvent, scope: FavoriteScope)
+}
 
 /**
  * 添加收藏动作的共享支撑（1.2.0 新增）

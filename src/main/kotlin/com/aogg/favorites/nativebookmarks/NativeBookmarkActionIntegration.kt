@@ -1,5 +1,7 @@
 package com.aogg.favorites.nativebookmarks
 
+import com.aogg.favorites.action.ScopedAddAction
+import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.settings.FavoritesSettings
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.AnAction
@@ -22,11 +24,13 @@ import com.intellij.util.xmlb.XmlSerializerUtil
 /**
  * 应用级"原生书签动作接管"状态（持久化）
  *
- * - replacedActionIds：已用 replaceAction 接管的原生动作 id（供恢复与防重复）
+ * - replacedActionIds：已用 replaceAction 接管的原生动作 id（供记录与防重复；接管为无条件，运行期不再恢复）
  * - hiddenActionIds：已被 templatePresentation.isVisible=false 隐藏的原生动作/组 id
+ *   （随"隐藏原生书签界面"开关显隐，关闭开关时恢复）
  *
  * 注意：原动作实例只保存在内存（[NativeBookmarkActionService]）中，
- * 运行期关闭开关时按记录恢复；重启后本就未替换，无需处理。
+ * [NativeBookmarkActionIntegration.restoreAll] 仅供记录回滚/卸载路径使用；
+ * 重启后未替换的 id 自动跳过，无需处理。
  */
 @State(
     name = "FavoritesNativeIntegrationState",
@@ -100,11 +104,14 @@ class NativeBookmarkActionService {
  * @param nativeActionId 被接管的原生动作 id（仅用于展示文案兜底）
  * @param favoritesActionId 转发目标的 Favorites 动作 id
  * @param text 菜单/键位编辑器中的显示文案
+ * @param fixedScope 非空时按固定作用域直接执行（转发目标需实现 [ScopedAddAction]），
+ *   不弹作用域二选一；原生快捷键接管路径固定为当前项目作用域。null 时保持原转发行为
  */
 class DelegateToFavoritesAction(
     private val nativeActionId: String,
     private val favoritesActionId: String,
-    text: String?
+    text: String?,
+    private val fixedScope: FavoriteScope? = null
 ) : AnAction() {
 
     init {
@@ -113,17 +120,37 @@ class DelegateToFavoritesAction(
     }
 
     override fun actionPerformed(e: AnActionEvent) {
-        val target = ActionManager.getInstance().getAction(favoritesActionId) ?: return
-        val event = AnActionEvent.createFromDataContext(
-            "FavoritesNativeAction",
-            null,
-            e.dataContext
-        )
-        target.actionPerformed(event)
+        runCatching {
+            val actionManager = ActionManager.getInstance()
+            val target = actionManager.getAction(favoritesActionId) ?: return
+
+            // 固定作用域路径：不弹作用域选择，直接按当前项目作用域执行（添加类动作接管专用）
+            if (fixedScope != null && target is ScopedAddAction) {
+                val scopedEvent = AnActionEvent.createFromDataContext(
+                    "FavoritesNativeAction",
+                    null,
+                    e.dataContext
+                )
+                target.performWithFixedScope(scopedEvent, fixedScope)
+                return
+            }
+
+            // 普通转发路径：行为与原 Favorites 动作一致（含作用域二选一）
+            val event = AnActionEvent.createFromDataContext(
+                "FavoritesNativeAction",
+                null,
+                e.dataContext
+            )
+            target.actionPerformed(event)
+        }.onFailure { log.warn("委托动作执行失败：$nativeActionId", it) }
     }
 
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabled = e.project != null
+    }
+
+    companion object {
+        private val log = Logger.getInstance(DelegateToFavoritesAction::class.java)
     }
 }
 
@@ -143,19 +170,28 @@ object NativeBookmarkActionIntegration {
     private const val GOTO_BOOKMARK_PREFIX = "GotoBookmark"
 
     /**
-     * 需要接管（replaceAction）的原生动作 id → 我们的 Favorites 动作 id
-     * 语义：ToggleBookmark→匿名收藏；ToggleBookmarkWithMnemonic→助记符收藏；
+     * 需要接管（replaceAction）的原生动作 id → 转发目标与执行方式
+     * 语义（接管为无条件，与设置开关无关）：
+     * ToggleBookmark→匿名收藏（固定当前项目作用域）；ToggleBookmarkWithMnemonic→助记符收藏（固定当前项目作用域）；
      * ShowBookmarks→收藏弹出列表；ActivateBookmarksToolWindow→收藏工具窗口开关
      */
-    private val REPLACED_BY_FAVORITES_ACTION = linkedMapOf(
-        "ToggleBookmark" to "Favorites.AddAnonymousBookmark",
-        "ToggleBookmarkWithMnemonic" to "Favorites.AddMnemonicBookmark",
-        "ShowBookmarks" to "Favorites.ShowBookmarksPopup",
-        "ActivateBookmarksToolWindow" to "Favorites.ToggleBookmarksToolWindow"
+    private val REPLACED_BY_FAVORITES_ACTION: Map<String, TakeoverSpec> = linkedMapOf(
+        "ToggleBookmark" to TakeoverSpec("Favorites.AddAnonymousBookmark", FavoriteScope.PROJECT),
+        "ToggleBookmarkWithMnemonic" to TakeoverSpec("Favorites.AddMnemonicBookmark", FavoriteScope.PROJECT),
+        "ShowBookmarks" to TakeoverSpec("Favorites.ShowBookmarksPopup"),
+        "ActivateBookmarksToolWindow" to TakeoverSpec("Favorites.ToggleBookmarksToolWindow")
     )
 
     /**
-     * 未替换、直接隐藏的原生书签动作（id 不存在时自动跳过）
+     * 接管规格
+     *
+     * @param favoritesActionId 转发目标的 Favorites 动作 id
+     * @param fixedScope 非空时按固定作用域执行（不弹作用域二选一；原生快捷键路径固定为当前项目）
+     */
+    private class TakeoverSpec(val favoritesActionId: String, val fixedScope: FavoriteScope? = null)
+
+    /**
+     * 未替换、仅随开关隐藏的原生书签动作（id 不存在时自动跳过）
      * - ToggleBookmark0..9 / ToggleBookmarkA..Z：助记符独立切换动作
      * - ShowTypeBookmarks：原生助记符书签弹出（Ctrl+Shift+F11）
      */
@@ -166,35 +202,66 @@ object NativeBookmarkActionIntegration {
     }
 
     /**
-     * 应用接管（设置开启时调用；动作管理器初始化与设置页 apply 共用）
+     * 接管原生动作（无条件执行；动作管理器初始化与设置页 apply 共用，幂等可重复调用）
+     *
+     * 只做 replaceAction 语义接管（id 不变 → 用户键位映射保留），不改动作可见性；
+     * 设置开关只控制[隐藏原生界面][hideNativeActions]/[restoreHiddenActions]
      */
     fun applyTo(actionManager: ActionManager) {
         runCatching {
             val state = FavoritesNativeIntegrationState.getInstance().state
             val originals = NativeBookmarkActionService.getInstance()
 
-            // 1) replaceAction 语义接管（id 不变 → 用户键位映射保留）
-            for ((nativeId, favoritesId) in REPLACED_BY_FAVORITES_ACTION) {
-                replaceWithDelegate(actionManager, originals, state, nativeId, favoritesId)
+            // 1) replaceAction 语义接管（id 不存在自动跳过；防重复替换）
+            for ((nativeId, spec) in REPLACED_BY_FAVORITES_ACTION) {
+                replaceWithDelegate(actionManager, originals, state, nativeId, spec)
             }
-            // 2) GotoBookmark0..9（及存在时的 A..Z 版本）→ 对应助记符跳转（按 id 尾字符分发）
+            // 2) GotoBookmark0..9（及存在时的 A..Z 版本）→ 对应助记符跳转（按 id 尾字符分发，作用域内先项目后全局）
             for (mnemonic in ('0'..'9') + ('A'..'Z')) {
                 replaceWithDelegate(
                     actionManager, originals, state,
                     "$GOTO_BOOKMARK_PREFIX$mnemonic",
-                    "Favorites.JumpToMnemonic.$mnemonic"
+                    TakeoverSpec("Favorites.JumpToMnemonic.$mnemonic")
                 )
             }
-            // 3) 隐藏未接管的残余原生动作与原生 Bookmarks 动作组
-            for (hiddenId in HIDDEN_ACTION_IDS) {
-                hideAction(actionManager, state, hiddenId)
-            }
-            hideAction(actionManager, state, NATIVE_BOOKMARKS_GROUP_ID)
         }.onFailure { log.warn("接管原生书签动作失败（不影响其它功能）", it) }
     }
 
     /**
-     * 恢复原生动作（关闭"隐藏原生书签入口"开关时调用）
+     * 隐藏原生书签界面动作（"隐藏原生书签界面"开关开启时调用）
+     *
+     * 隐藏未接管的残余原生动作（ToggleBookmark0-9/A-Z、ShowTypeBookmarks）与原生 Bookmarks 动作组
+     */
+    fun hideNativeActions(actionManager: ActionManager) {
+        runCatching {
+            val state = FavoritesNativeIntegrationState.getInstance().state
+            for (hiddenId in HIDDEN_ACTION_IDS) {
+                hideAction(actionManager, state, hiddenId)
+            }
+            hideAction(actionManager, state, NATIVE_BOOKMARKS_GROUP_ID)
+        }.onFailure { log.warn("隐藏原生书签界面动作失败（不影响其它功能）", it) }
+    }
+
+    /**
+     * 恢复原生界面动作可见性（"隐藏原生书签界面"开关关闭时调用；不影响已接管的快捷键动作）
+     */
+    fun restoreHiddenActions(actionManager: ActionManager) {
+        runCatching {
+            val state = FavoritesNativeIntegrationState.getInstance().state
+            for (actionId in state.hiddenActionIds.toList()) {
+                runCatching {
+                    actionManager.getAction(actionId)?.let { action ->
+                        action.templatePresentation.isVisible = true
+                    }
+                }.onFailure { log.warn("恢复原生动作可见性失败：$actionId", it) }
+            }
+            state.hiddenActionIds.clear()
+        }.onFailure { log.warn("恢复原生书签界面动作失败（不影响其它功能）", it) }
+    }
+
+    /**
+     * 全量恢复原生动作（按记录回滚 replaceAction 与可见性；仅供记录回滚/卸载路径使用，
+     * 运行期设置开关不再调用——快捷键接管为无条件）
      */
     fun restoreAll(actionManager: ActionManager) {
         runCatching {
@@ -213,16 +280,8 @@ object NativeBookmarkActionIntegration {
                 }.onFailure { log.warn("恢复原生动作失败：$actionId", it) }
             }
 
-            for (actionId in state.hiddenActionIds.toList()) {
-                runCatching {
-                    actionManager.getAction(actionId)?.let { action ->
-                        action.templatePresentation.isVisible = true
-                    }
-                }.onFailure { log.warn("恢复原生动作可见性失败：$actionId", it) }
-            }
-
+            restoreHiddenActions(actionManager)
             state.replacedActionIds.clear()
-            state.hiddenActionIds.clear()
         }.onFailure { log.warn("恢复原生书签动作失败", it) }
     }
 
@@ -234,17 +293,18 @@ object NativeBookmarkActionIntegration {
         originals: NativeBookmarkActionService,
         state: FavoritesNativeIntegrationState.State,
         nativeActionId: String,
-        favoritesActionId: String
+        spec: TakeoverSpec
     ) {
         runCatching {
             val current = actionManager.getAction(nativeActionId) ?: return // 不同版本无此 id，跳过
             if (current.javaClass.name.startsWith(OUR_PACKAGE_PREFIX)) return // 已是委托动作，防重复
 
-            val favoritesAction = actionManager.getAction(favoritesActionId)
+            val favoritesAction = actionManager.getAction(spec.favoritesActionId)
             val delegate = DelegateToFavoritesAction(
                 nativeActionId = nativeActionId,
-                favoritesActionId = favoritesActionId,
-                text = favoritesAction?.templatePresentation?.text
+                favoritesActionId = spec.favoritesActionId,
+                text = favoritesAction?.templatePresentation?.text,
+                fixedScope = spec.fixedScope
             )
             originals.putOriginal(nativeActionId, current)
             actionManager.replaceAction(nativeActionId, delegate)
@@ -276,17 +336,22 @@ object NativeBookmarkActionIntegration {
 /**
  * ActionConfigurationCustomizer 扩展点实现（233 签名：void customize(@NotNull ActionManager)）
  *
- * 动作管理器初始化时执行一次：设置开启时接管原生书签动作（默认开启）。
+ * 动作管理器初始化时执行一次：
+ * - 无条件接管原生书签动作（与设置开关无关，快捷键始终由本插件接管）；
+ * - "隐藏原生书签界面"开关开启（默认）时额外隐藏残余原生动作与原生 Bookmarks 动作组。
  * 注册：plugin.xml 中 <actionConfigurationCustomizer implementation="..."/>
  */
 class NativeBookmarkActionCustomizer : ActionConfigurationCustomizer {
 
     override fun customize(actionManager: ActionManager) {
+        // 1) 快捷键接管：无条件（幂等），不再受设置开关影响
+        NativeBookmarkActionIntegration.applyTo(actionManager)
+        // 2) 原生界面可见性：随"隐藏原生书签界面"开关（默认开启）
         val hideNative = runCatching {
             FavoritesSettings.getInstance().state.hideNativeBookmarks
         }.getOrDefault(true)
         if (hideNative) {
-            NativeBookmarkActionIntegration.applyTo(actionManager)
+            NativeBookmarkActionIntegration.hideNativeActions(actionManager)
         }
     }
 }
@@ -297,8 +362,9 @@ class NativeBookmarkActionCustomizer : ActionConfigurationCustomizer {
 
 /**
  * 原生书签集成统一门面：
- * - 开启：接管原生动作（应用级一次）+ 隐藏所有已打开项目的原生 Bookmarks 工具窗口
- * - 关闭：恢复原生动作 + 恢复工具窗口可见性
+ * - 快捷键接管：无条件执行（幂等，不再随开关恢复）；
+ * - "隐藏原生书签界面"开关：只控制残余原生动作/动作组可见性与原生 Bookmarks 工具窗口显隐；
+ * - 手势接管（Ctrl+点击 gutter）：由 FavoritesGutterGestureListener 在项目打开时无条件注册
  */
 object FavoritesNativeIntegration {
 
@@ -314,12 +380,16 @@ object FavoritesNativeIntegration {
         }.getOrDefault(true)
 
         val actionManager = ActionManager.getInstance()
+        // 1) 快捷键接管：无条件（幂等，开关只影响界面可见性）
+        NativeBookmarkActionIntegration.applyTo(actionManager)
+        // 2) 残余原生动作/动作组可见性：随开关
         if (hideNative) {
-            NativeBookmarkActionIntegration.applyTo(actionManager)
+            NativeBookmarkActionIntegration.hideNativeActions(actionManager)
         } else {
-            NativeBookmarkActionIntegration.restoreAll(actionManager)
+            NativeBookmarkActionIntegration.restoreHiddenActions(actionManager)
         }
 
+        // 3) 原生 Bookmarks 工具窗口：随开关
         val projects = runCatching {
             ProjectManager.getInstance().openProjects.toList()
         }.getOrNull().orEmpty()

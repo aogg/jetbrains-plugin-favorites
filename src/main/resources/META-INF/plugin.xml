@@ -13,7 +13,7 @@
     - 收藏管理工具窗口：PhpStorm 风格树状视图（上级目录树/文件夹懒加载展开/行收藏挂文件节点/按文件类型图标）、实时过滤、排序、快速跳转
     - 快速访问：弹出窗口快速跳转到收藏位置
     - 导入原生书签：一键导入 PhpStorm 原生书签（运行时 API + .idea XML 容错解析，自动去重与增量合并）
-    - 隐藏原生书签入口：默认接管 F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 并隐藏原生 Bookmarks 工具窗口，可在设置中关闭
+    - 原生书签快捷键接管：F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 与 Ctrl+点击行号区/图标区手势始终由本插件接管（添加固定为当前项目收藏）；可在设置中隐藏原生书签界面（工具窗口与残余原生动作）
     - 规则匹配：树新增第三根节点「规则匹配」，支持正则（项目内路径匹配）、SQL（执行查询可选路径列跳转）、SSH（远程执行命令按行展示）三类规则，规则随项目保存在 .idea/favorites.rules.xml
     ]]></description>
 
@@ -173,7 +173,8 @@
         <!-- 通知组（BALLOON）：导入完成通知与首次引导 -->
         <notificationGroup id="Favorites.Notifications" displayType="BALLOON"/>
 
-        <!-- 动作管理器初始化时接管/隐藏原生书签动作（读取 FavoritesSettings.hideNativeBookmarks，默认开启） -->
+        <!-- 动作管理器初始化时无条件接管原生书签动作（快捷键始终由本插件接管，添加固定当前项目收藏）；
+             "隐藏原生书签界面"开关只控制残余原生动作/动作组与原生 Bookmarks 工具窗口的可见性 -->
         <actionConfigurationCustomizer implementation="com.aogg.favorites.nativebookmarks.NativeBookmarkActionCustomizer"/>
 
         <!-- 工具窗口（贴近 PhpStorm Bookmarks 习惯，停靠在左侧） -->

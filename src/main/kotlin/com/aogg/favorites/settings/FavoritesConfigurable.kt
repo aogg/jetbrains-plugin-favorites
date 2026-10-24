@@ -16,8 +16,11 @@ import javax.swing.JSeparator
 /**
  * Settings → Tools → Favorites 设置页
  *
- * - ☑ 禁用 PhpStorm 原生书签功能（默认禁用）：
- *   apply 时立即生效/恢复（动作接管 + 所有已打开项目的原生 Bookmarks 工具窗口显隐）
+ * - ☑ 隐藏 PhpStorm 原生书签界面（默认开启）：
+ *   只控制原生 Bookmarks 工具窗口与残余原生动作/动作组可见性；
+ *   快捷键（F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 等）与 Ctrl+点击行号区手势
+ *   始终由本插件接管，不受本开关影响
+ * - apply 时界面显隐立即生效/恢复（动作组可见性 + 所有已打开项目的原生 Bookmarks 工具窗口）
  * - 按钮：重置"导入提示"标记（重新触发首次引导检测）
  * - 布局：垂直排列（开关 → 分隔线 → 重置按钮 + 说明），1.2.0 整理
  */
@@ -35,7 +38,7 @@ class FavoritesConfigurable : Configurable {
 
         // ////////////////  核心逻辑：垂直布局组装  start  /////////////////////////////
         val checkBox = JBCheckBox(
-            "禁用 PhpStorm 原生书签功能（默认禁用；F11/Ctrl+F11/Shift+F11/Alt+2 等由本插件接管）",
+            "隐藏 PhpStorm 原生书签界面（快捷键始终由本插件接管，收藏加入当前项目）",
             settings.state.hideNativeBookmarks
         )
         hideNativeCheckBox = checkBox
@@ -78,7 +81,8 @@ class FavoritesConfigurable : Configurable {
         val new = checkBox.isSelected
         settings.state.hideNativeBookmarks = new
 
-        // 勾选变化时立即应用/恢复（动作替换 + 工具窗口显隐，覆盖所有已打开项目）
+        // 勾选变化时立即生效/恢复原生界面显隐（残余动作可见性 + 工具窗口，覆盖所有已打开项目）
+        // 快捷键接管为无条件，不随开关恢复
         if (old != new) {
             FavoritesNativeIntegration.applyOrRestore()
         }

@@ -4,6 +4,7 @@ import com.aogg.favorites.listener.BookmarkEditorListener
 import com.aogg.favorites.listener.BookmarkProjectListener
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.nativebookmarks.FavoritesFirstRunGuide
+import com.aogg.favorites.nativebookmarks.FavoritesGutterGestureListener
 import com.aogg.favorites.nativebookmarks.NativeBookmarksToolWindowHider
 import com.aogg.favorites.settings.FavoritesSettings
 import com.intellij.openapi.application.ApplicationManager
@@ -33,6 +34,10 @@ class FavoritesPlugin : StartupActivity {
         }
         // 兜底监听始终注册：内部自行判断开关状态（被显示就再藏 / 开关关闭时不作为）
         NativeBookmarksToolWindowHider.registerListener(project)
+
+        // 1.4.x：gutter 手势接管（Ctrl/⌘+点击 行号区/图标区 → 当前项目匿名收藏）
+        // 无条件注册：手势与快捷键一样始终由本插件接管，不受"隐藏原生书签界面"开关影响
+        FavoritesGutterGestureListener.register(project)
 
         // 阶段 B：首次引导（!importedNative && !dontAskAgain 且检测到原生书签数>0 时弹 BALLOON）
         ApplicationManager.getApplication().invokeLater {

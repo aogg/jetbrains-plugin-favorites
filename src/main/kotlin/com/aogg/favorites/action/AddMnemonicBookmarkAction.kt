@@ -25,30 +25,48 @@ import java.util.*
  * - 再打开 MnemonicSelectorDialog（标题/提示带作用域名，占用检测按该作用域）；
  * - 同一位置的旧助记符收藏（两个作用域都查）在新增时被替换，维持"重新设置助记符"语义；
  * - 加入 GLOBAL 时写入绝对路径；项目外位置只能加入 GLOBAL。
+ *
+ * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
+ * 固定作用域入口（如原生 ToggleBookmarkWithMnemonic 委托）不弹作用域选择，
+ * 直接按指定作用域（当前项目）打开助记符对话框；右键菜单等原入口行为不变。
  */
-class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助记符收藏", null) {
+class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助记符收藏", null), ScopedAddAction {
 
     override fun actionPerformed(e: AnActionEvent) {
+        handleAction(e, fixedScope = null)
+    }
+
+    /**
+     * 固定作用域执行入口（原生动作接管路径专用）：不弹作用域二选一，直接按 [scope] 打开助记符对话框
+     */
+    override fun performWithFixedScope(e: AnActionEvent, scope: FavoriteScope) {
+        handleAction(e, fixedScope = scope)
+    }
+
+    /**
+     * 统一入口：按上下文收集目标位置后处理（fixedScope 为空时保持原作用域选择行为）
+     */
+    private fun handleAction(e: AnActionEvent, fixedScope: FavoriteScope?) {
         val project = e.project ?: return
 
         // 尝试从编辑器获取位置
         val editor = e.getData(CommonDataKeys.EDITOR)
         if (editor != null) {
-            handleEditorContext(project, editor)
+            handleEditorContext(project, editor, fixedScope)
             return
         }
 
         // 尝试从项目窗口获取文件/文件夹
         val virtualFiles = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)
         if (virtualFiles != null && virtualFiles.isNotEmpty()) {
-            handleProjectContext(project, virtualFiles)
+            handleProjectContext(project, virtualFiles, fixedScope)
             return
         }
 
         // 尝试从标签页右键菜单获取文件（EditorTabPopupMenu）
         val virtualFile = e.getData(CommonDataKeys.VIRTUAL_FILE)
         if (virtualFile != null) {
-            handleFileContext(project, virtualFile, editor)
+            handleFileContext(project, virtualFile, editor, fixedScope)
             return
         }
 
@@ -56,7 +74,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         val fileEditorManager = FileEditorManager.getInstance(project)
         val selectedFiles = fileEditorManager.selectedFiles
         if (selectedFiles.isNotEmpty()) {
-            handleFileContext(project, selectedFiles[0], editor)
+            handleFileContext(project, selectedFiles[0], editor, fixedScope)
             return
         }
 
@@ -70,7 +88,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
     /**
      * 处理编辑器上下文（代码行收藏）
      */
-    private fun handleEditorContext(project: Project, editor: Editor) {
+    private fun handleEditorContext(project: Project, editor: Editor, fixedScope: FavoriteScope?) {
         val document = editor.document
         val currentOffset = editor.caretModel.offset
         val lineNumber = document.getLineNumber(currentOffset)
@@ -81,13 +99,13 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         // 行收藏位置（type 显式覆盖为 LINE）
         val location = AddActionSupport.locationOf(project, virtualFile, lineNumber)
             .copy(type = BookmarkType.LINE)
-        processLocation(project, location)
+        processLocation(project, location, fixedScope)
     }
 
     /**
      * 处理项目窗口上下文（文件/文件夹收藏）
      */
-    private fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>) {
+    private fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>, fixedScope: FavoriteScope?) {
         // 助记符收藏每个标识符只能使用一次，所以只处理第一个文件/文件夹
         // 如果选择了多个，提示用户
         if (virtualFiles.size > 1) {
@@ -98,43 +116,66 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
             )
         }
 
-        processLocation(project, AddActionSupport.locationOf(project, virtualFiles[0], -1))
+        processLocation(project, AddActionSupport.locationOf(project, virtualFiles[0], -1), fixedScope)
     }
 
     /**
      * 处理文件上下文（标签页收藏）
      */
-    private fun handleFileContext(project: Project, virtualFile: VirtualFile, editor: Editor?) {
+    private fun handleFileContext(project: Project, virtualFile: VirtualFile, editor: Editor?, fixedScope: FavoriteScope?) {
         if (editor != null) {
             // 如果有编辑器，收藏当前行
-            handleEditorContext(project, editor)
+            handleEditorContext(project, editor, fixedScope)
         } else {
             // 否则收藏文件
-            processLocation(project, AddActionSupport.locationOf(project, virtualFile, -1))
+            processLocation(project, AddActionSupport.locationOf(project, virtualFile, -1), fixedScope)
         }
     }
 
     /**
      * 统一处理单个目标位置：选作用域 → 助记符对话框 → 替换写入
+     *
+     * @param fixedScope 非空时跳过作用域选择，直接按该作用域打开助记符对话框；null 时保持原行为
      */
-    private fun processLocation(project: Project, location: AddActionSupport.PendingLocation) {
+    private fun processLocation(
+        project: Project,
+        location: AddActionSupport.PendingLocation,
+        fixedScope: FavoriteScope? = null
+    ) {
         // ////////////////  准备数据：该位置已有助记符收藏（两作用域，用于预填）  start  ///
         val existingAtPosition = AddActionSupport.findExisting(project, location) { it.isMnemonic() }
         val prefillMnemonic = existingAtPosition.firstOrNull()?.bookmark?.mnemonic
         // ////////////////  准备数据  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：先选作用域，再开助记符对话框  start  ////////////////
-        AddScopeChooser.chooseScope(project) { scope ->
-            val dialog = MnemonicSelectorDialog(
-                project,
-                scope = scope,
-                currentMnemonic = prefillMnemonic
-            )
-            if (!dialog.showAndGet()) return@chooseScope
-            val selectedMnemonic = dialog.selectedMnemonic ?: return@chooseScope
-            performAdd(project, scope, location, selectedMnemonic, dialog.description, existingAtPosition)
+        // ////////////////  核心逻辑：先定作用域（固定或选择），再开助记符对话框  start  ///
+        if (fixedScope != null) {
+            openMnemonicDialogAndAdd(project, fixedScope, location, prefillMnemonic, existingAtPosition)
+        } else {
+            AddScopeChooser.chooseScope(project) { scope ->
+                openMnemonicDialogAndAdd(project, scope, location, prefillMnemonic, existingAtPosition)
+            }
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 打开助记符对话框并在确认后写入（作用域由调用方决定：固定作用域或弹窗选择）
+     */
+    private fun openMnemonicDialogAndAdd(
+        project: Project,
+        scope: FavoriteScope,
+        location: AddActionSupport.PendingLocation,
+        prefillMnemonic: Char?,
+        existingAtPosition: List<com.aogg.favorites.ui.ScopedBookmark>
+    ) {
+        val dialog = MnemonicSelectorDialog(
+            project,
+            scope = scope,
+            currentMnemonic = prefillMnemonic
+        )
+        if (!dialog.showAndGet()) return
+        val selectedMnemonic = dialog.selectedMnemonic ?: return
+        performAdd(project, scope, location, selectedMnemonic, dialog.description, existingAtPosition)
     }
 
     /**

@@ -10,10 +10,12 @@ import com.intellij.util.xmlb.XmlSerializerUtil
 /**
  * Favorites 应用级设置（持久化）
  *
- * hideNativeBookmarks 默认开启：
- * - 开启时由 NativeBookmarkActionCustomizer（actionConfigurationCustomizer EP）接管原生书签动作，
- *   并在项目打开后隐藏原生 Bookmarks 工具窗口；
- * - apply 变化时由 FavoritesNativeIntegration.applyOrRestore() 立即生效/恢复。
+ * hideNativeBookmarks 默认开启（1.4.x 语义收窄：只控制「隐藏原生书签界面」，不影响快捷键归属）：
+ * - 原生书签快捷键（F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 等）与 Ctrl+点击行号区手势
+ *   由 NativeBookmarkActionCustomizer / FavoritesGutterGestureListener 无条件接管；
+ * - 开启时额外隐藏原生书签界面：原生 Bookmarks 工具窗口、残余原生动作
+ *   （ToggleBookmark0-9/A-Z、ShowTypeBookmarks）与原生动作组；
+ * - apply 变化时由 FavoritesNativeIntegration.applyOrRestore() 立即生效/恢复界面显隐。
  */
 @State(
     name = "FavoritesSettings",
@@ -27,7 +29,9 @@ class FavoritesSettings : PersistentStateComponent<FavoritesSettings.State> {
      */
     class State {
         /**
-         * 是否隐藏 PhpStorm 原生书签入口（默认开启）
+         * 是否隐藏 PhpStorm 原生书签界面（默认开启）
+         * 1.4.x 语义收窄：只控制原生 Bookmarks 工具窗口与残余原生动作/动作组的可见性；
+         * 原生书签快捷键与 Ctrl+点击行号区手势始终由本插件接管，不受本开关影响
          */
         var hideNativeBookmarks: Boolean = true
 
