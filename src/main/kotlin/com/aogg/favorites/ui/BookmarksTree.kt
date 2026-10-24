@@ -1347,7 +1347,7 @@ class BookmarksTree(
             .onFailure { log.warn("注册行内容资源注销句柄失败", it) }
         runCatching {
             VirtualFileManager.getInstance().addVirtualFileListener(object : VirtualFileListener {
-                override fun contentChanged(event: VirtualFileEvent) {
+                override fun contentsChanged(event: VirtualFileEvent) {
                     if (project.isDisposed) return
                     // VFS 事件可能在非 EDT 线程触发（同步刷新等），统一转发 EDT 处理（防抖集合/树访问仅 EDT）
                     runOnEdt { scheduleLineRefreshForPath(event.file.path) }
@@ -1385,7 +1385,7 @@ class BookmarksTree(
     private fun scheduleLineRefreshForPath(path: String) {
         if (!hasLineEntryForPath(path)) return
         pendingLineRefreshPaths.add(path)
-        val timer = lineRefreshTimer ?: Timer(LINE_REFRESH_DEBOUNCE_MS).also {
+        val timer = lineRefreshTimer ?: Timer(LINE_REFRESH_DEBOUNCE_MS, null).also {
             it.isRepeats = false
             it.addActionListener {
                 // Swing Timer 到点在 EDT 执行；pendingLineRefreshPaths 仅 EDT 访问
