@@ -408,7 +408,14 @@ class BookmarksTree(
         isRootVisible = false
         showsRootHandles = true
         model = DefaultTreeModel(DefaultMutableTreeNode("root"))
-        cellRenderer = BookmarksTreeCellRenderer(project)
+        val renderer = BookmarksTreeCellRenderer(project)
+        cellRenderer = renderer
+        // 安装取证（idea.log 搜 FavoritesTree）：对比设置值与 getCellRenderer() 实际返回，
+        // 若两者类名不一致说明存在第三方胶水层在构造期换走 renderer
+        log.info(
+            "FavoritesTree renderer installed: ${renderer.javaClass.name}, " +
+                "getCellRenderer()=${getCellRenderer()?.javaClass?.name}"
+        )
 
         // 速度搜索（按节点文本匹配，各层节点 toString 均参与）
         TreeUIHelper.getInstance().installTreeSpeedSearch(this)

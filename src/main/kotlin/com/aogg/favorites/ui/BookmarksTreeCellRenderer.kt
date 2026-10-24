@@ -5,35 +5,56 @@ import com.aogg.favorites.model.RuleType
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.ui.ColoredTreeCellRenderer
+import com.intellij.ui.SimpleColoredComponent
 import com.intellij.ui.SimpleTextAttributes
+import com.intellij.ui.render.RenderingUtil
+import com.intellij.ui.speedSearch.SpeedSearchUtil
+import java.awt.Component
+import java.awt.Graphics
 import java.io.File
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
+import javax.swing.tree.TreeCellRenderer
 
 /**
- * 收藏树单元格渲染器（1.3.0 PhpStorm 风格，改用 ColoredTreeCellRenderer）：
- * - 主文本正常色 + 右侧灰色说明文字（SimpleTextAttributes.GRAYED_ATTRIBUTES），替代原 DefaultTreeCellRenderer
- * - 作用域节点：作用域图标 + "作用域名 (总数)"
- * - 列表节点：文件夹图标 + "名称 (收藏数)"
- * - 目录节点：文件夹图标（展开/折叠同图标）+ 目录名；文件夹收藏节点灰色补充路径；目录缺失/不可读显示红叉图标
- * - 文件节点：IDE 文件类型图标（.php/.bat/.sql 等按扩展名自然区分）+ 文件名；文件收藏节点灰色补充父目录路径与描述
- * - 行收藏节点：助记符/匿名书签图标 + "行号:" + 灰色行内容
- * - 未收藏真实文件节点：文件类型图标 + 文件名
- * - 规则匹配根节点（1.4.0）：文件夹图标 + "规则匹配 (N 规则/M 条)"
- * - 规则节点（1.4.0）：按规则类型给图标（正则/SQL/SSH）；主文本含状态后缀（✅ M / ⏳ / ❌），ERROR 时 tooltip=失败原因
- * - 规则条目节点（1.4.0）：FileItem 用 IDE 文件类型图标（文件名+灰色父路径）；RowItem/LineItem 用文档图标
- * - 兜底：未识别节点类型给通用图标（AllIcons.FileTypes.Any）+ toString 主文本，任何分支漏配/新增节点类型不至于无图标
+ * 收藏树单元格渲染器（1.5.1 加固：直接实现 TreeCellRenderer，不再继承 ColoredTreeCellRenderer）：
+ * - 绕开平台 ColoredTreeCellRenderer.rendererComponentInner 胶水层（其内部对宽选/焦点边框/isForPainting
+ *   的处理链在第三方主题/图标插件环境下有被接管清空图标的先例），改由本类自管完整渲染时序：
+ *   clear → 字体/选中态配色 → customize（按节点类型设图标与文本）→ 图标兜底 → 速度搜索高亮 → 返回自身
+ * - 行内容非空必有图标（双重兜底）：
+ *   1) getTreeCellRendererComponent 尾部 icon==null 时补 AllIcons.FileTypes.Any_type
+ *   2) paintComponent 绘制前 icon==null 且已有文本片段时补 AllIcons.FileTypes.Any_type
+ *      （绘制级保险：即使存在任何胶水层在渲染后清图标，绘制时也会补回）
+ * - 选中态背景/前景与 ColoredTreeCellRenderer 非宽选路径语义一致（RenderingUtil 取树当前配色，不写死色值）
+ * - 速度搜索高亮沿用 SpeedSearchUtil.applySpeedSearchHighlightingFiltered（主文本参与匹配，行为同平台）
+ * - 运行时取证日志（idea.log 搜 FavoritesTree 前缀）：
+ *   安装时 BookmarksTree 记 renderer 是否真实生效；本渲染器前 [DIAGNOSTIC_LOG_LIMIT] 次调用逐次记
+ *   节点/图标信息；若发现 this !== tree.getCellRenderer()（第三方插件运行时换走 renderer）只报一次
+ *   error——这是定位「树节点无图标」的最关键证据
  * 各节点 toString 返回主文本，作为 TreeSpeedSearch 的匹配文本（灰色说明文字不参与速度搜索）
  *
  * @param project 项目（解析 VirtualFile 计算文件类型图标）
  */
-class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellRenderer() {
+class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredComponent(), TreeCellRenderer {
 
-    override fun customizeCellRenderer(
+    companion object {
+        private val log = Logger.getInstance(BookmarksTreeCellRenderer::class.java)
+
+        /** 渲染取证日志节流：仅前 N 次调用逐次记录，之后静默（防 idea.log 刷屏） */
+        private const val DIAGNOSTIC_LOG_LIMIT = 30
+    }
+
+    /** 渲染调用计数（节流取证日志用，仅 EDT 访问） */
+    private var renderCount = 0
+
+    /** 「renderer 被运行时替换」错误日志是否已报过（只报一次防刷屏，仅 EDT 访问） */
+    private var replacedLogged = false
+
+    override fun getTreeCellRendererComponent(
         tree: JTree,
         value: Any,
         selected: Boolean,
@@ -41,13 +62,58 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
         leaf: Boolean,
         row: Int,
         hasFocus: Boolean
-    ) {
-        // ////////////////  准备数据：取节点用户对象 + 重置 tooltip（防上一行残留）  start  //
-        val node = (value as? DefaultMutableTreeNode)?.userObject
+    ): Component {
+        // ////////////////  前置：清空上一行残留（图标/文本/备注/tooltip 一并复位）  start  //
+        clear()
         toolTipText = null
-        // ////////////////  准备数据  end  ////////////////////////////////////////////
+        // ////////////////  前置  end  ////////////////////////////////////////////////
+
+        // ////////////////  字体与选中态配色（与 ColoredTreeCellRenderer 非宽选路径语义一致）  //
+        font = tree.font
+        background = if (selected) RenderingUtil.getSelectionBackground(tree) else null
+        foreground = RenderingUtil.getForeground(tree, selected)
+        isOpaque = true
+        // ////////////////  字体与选中态配色  end  ////////////////////////////////////
 
         // ////////////////  核心逻辑：按节点类型渲染图标与主文本/灰色说明  start  ///////
+        icon = null
+        customize(tree, value)
+        // 兜底一：任何分支漏配/图标解析失败时保底通用图标（与 customize 各分支设 icon 语义衔接）
+        if (icon == null) {
+            icon = AllIcons.FileTypes.Any_type
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // 速度搜索高亮（主文本参与匹配，行为同平台 ColoredTreeCellRenderer 胶水层）
+        SpeedSearchUtil.applySpeedSearchHighlightingFiltered(tree, value, this, true, selected)
+
+        // 运行时取证：节流日志 + renderer 被换监测（在 customize/兜底完成后取最终值）
+        logDiagnostics(tree, value)
+        return this
+    }
+
+    /**
+     * 绘制级兜底（兜底二）：绘制前若行内容非空（已有文本片段）却无图标，先补通用图标再绘制。
+     * 保证任何情况下（第三方主题/插件胶水层清掉图标等）行内容非空必有图标可显示
+     */
+    override fun paintComponent(g: Graphics) {
+        if (icon == null && fragmentCount > 0) {
+            icon = AllIcons.FileTypes.Any_type
+        }
+        super.paintComponent(g)
+    }
+
+    /**
+     * 按节点类型设置图标与主文本/灰色说明（1.3.0 起各分支语义保持不变，仅从 customizeCellRenderer 平移）
+     *
+     * @param tree 树组件（当前未直接使用，保留参数与原方法签名一致）
+     * @param value 树节点（DefaultMutableTreeNode 包装用户对象）
+     */
+    private fun customize(tree: JTree, value: Any) {
+        // ////////////////  准备数据：取节点用户对象  start  //////////////////////////
+        val node = (value as? DefaultMutableTreeNode)?.userObject
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
         when (node) {
             // 作用域节点（含总数徽标文案）
             is ScopeNode -> {
@@ -174,7 +240,34 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                 append(node?.toString() ?: "")
             }
         }
-        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 运行时取证（节流）：
+     * - this !== tree.getCellRenderer() 说明渲染器被第三方插件/主题在运行时换走（无图标问题的决定性证据），
+     *   用布尔标记只报一次 error，不受计数限制
+     * - 前 [DIAGNOSTIC_LOG_LIMIT] 次调用逐次记 info：节点类型/图标类型/图标宽高/一致性，
+     *   用于确认本渲染器正常工作（icon 非空、consistent=true）
+     *
+     * @param tree 树组件（取其当前 renderer 对比一致性）
+     * @param value 当前渲染的树节点
+     */
+    private fun logDiagnostics(tree: JTree, value: Any) {
+        val currentRenderer = tree.getCellRenderer()
+        if (currentRenderer !== this && !replacedLogged) {
+            replacedLogged = true
+            log.error("FavoritesTree renderer replaced at runtime by: " + currentRenderer?.javaClass?.name)
+        }
+        if (renderCount < DIAGNOSTIC_LOG_LIMIT) {
+            renderCount++
+            val node = (value as? DefaultMutableTreeNode)?.userObject
+            log.info(
+                "FavoritesTreeRenderer node=${node?.javaClass?.simpleName} " +
+                    "icon=${icon?.javaClass?.simpleName} " +
+                    "w=${icon?.iconWidth ?: -1} h=${icon?.iconHeight ?: -1} " +
+                    "consistent=${this === currentRenderer}"
+            )
+        }
     }
 
     /**
