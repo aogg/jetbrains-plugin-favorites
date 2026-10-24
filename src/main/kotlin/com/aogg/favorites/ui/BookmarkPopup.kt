@@ -26,6 +26,8 @@ import javax.swing.ListSelectionModel
  * 支持键盘导航和搜索
  *
  * 1.2.0 分组展示：按「项目收藏」「全局收藏」两组（分组标题），组内沿用列表名子标题。
+ * 1.5.x 分组路径展示：子标题升级为分组完整路径（如「父组/子组 (3)」）并带收藏数，
+ * 多层级不展开为嵌套弹层、平铺即可；键盘导航/速度搜索沿用。
  */
 class BookmarkPopup(
     private val project: Project,
@@ -44,10 +46,14 @@ class BookmarkPopup(
         }
 
         /**
-         * 列表子标题（组内沿用列表名）
+         * 列表子标题（1.5.x 起按分组完整路径平铺展示，如「父组/子组 (3)」）：
+         * 分组层级不展开为嵌套弹层，沿用现有键盘导航/过滤
+         *
+         * @param path 分组完整层级路径（默认列表即「收藏」）
+         * @param count 该分组下的收藏条数
          */
-        class ListHeader(val listName: String) : PopupItem() {
-            override fun toString(): String = listName
+        class ListHeader(val path: String, val count: Int) : PopupItem() {
+            override fun toString(): String = "$path ($count)"
         }
 
         /**
@@ -62,23 +68,23 @@ class BookmarkPopup(
      * 显示弹出窗口
      */
     fun show() {
-        // ////////////////  准备数据：按作用域→列表构建分组条目  start  //////////////////
+        // ////////////////  准备数据：按作用域→分组构建平铺条目  start  //////////////////
         val model = DefaultListModel<PopupItem>()
         for (scope in FavoriteScope.entries) {
             val manager = FavoritesScopeResolver.managerFor(project, scope)
             val listNames = manager.getLists().map { it.name }
                 .ifEmpty { listOf(Bookmark.DEFAULT_LIST_NAME) }
-            // 该作用域下所有收藏按列表名分组（沿用各列表记忆的排序）
+            // 该作用域下所有收藏按分组归拢（沿用各分组记忆的排序；标题取分组完整路径）
             val grouped = listNames.mapNotNull { name ->
                 val bookmarks = manager.getBookmarksByList(name)
-                if (bookmarks.isEmpty()) null else name to bookmarks
+                if (bookmarks.isEmpty()) null else manager.fullPath(name) to bookmarks
             }
             // 空作用域不显示分组标题，减少噪音
             if (grouped.isEmpty()) continue
 
             model.addElement(PopupItem.ScopeHeader(scope))
-            for ((listName, bookmarks) in grouped) {
-                model.addElement(PopupItem.ListHeader(listName))
+            for ((groupPath, bookmarks) in grouped) {
+                model.addElement(PopupItem.ListHeader(groupPath, bookmarks.size))
                 bookmarks.forEach { model.addElement(PopupItem.Entry(it)) }
             }
         }
@@ -198,10 +204,10 @@ class BookmarkPopup(
                         component.font = component.font.deriveFont(Font.BOLD)
                         component.iconTextGap = JBUI.scale(8)
                     }
-                    // 列表子标题：加粗 + 文件夹图标
+                    // 列表子标题：加粗 + 文件夹图标（按分组完整路径 + 收藏数展示）
                     is PopupItem.ListHeader -> {
                         component.icon = com.intellij.icons.AllIcons.Nodes.Folder
-                        component.text = value.listName
+                        component.text = value.toString()
                         component.font = component.font.deriveFont(Font.BOLD)
                         component.iconTextGap = JBUI.scale(8)
                     }

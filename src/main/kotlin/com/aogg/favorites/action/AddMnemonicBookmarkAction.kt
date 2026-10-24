@@ -21,14 +21,16 @@ import java.util.*
  * 弹出助记符选择对话框，处理标识符冲突
  *
  * 1.2.0 双作用域语义：
- * - 先弹「项目收藏/全局收藏」二选一（默认高亮上次使用的作用域，选择后记住）；
+ * - 先弹选择（1.5.x 升级为 [com.aogg.favorites.ui.ScopeGroupChooserPopup] 分组树：
+ *   默认高亮上次使用的「作用域+分组」，选择后记住）；
  * - 再打开 MnemonicSelectorDialog（标题/提示带作用域名，占用检测按该作用域）；
  * - 同一位置的旧助记符收藏（两个作用域都查）在新增时被替换，维持"重新设置助记符"语义；
  * - 加入 GLOBAL 时写入绝对路径；项目外位置只能加入 GLOBAL。
  *
  * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
  * 固定作用域入口（如原生 ToggleBookmarkWithMnemonic 委托）不弹作用域选择，
- * 直接按指定作用域（当前项目）打开助记符对话框；右键菜单等原入口行为不变。
+ * 直接按指定作用域打开助记符对话框；1.5.x 起目标分组取「该作用域上次使用的分组」，
+ * 无记忆/记忆已删除则回退默认「收藏」；右键菜单等原入口行为不变。
  */
 class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助记符收藏", null), ScopedAddAction {
 
@@ -147,23 +149,29 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         val prefillMnemonic = existingAtPosition.firstOrNull()?.bookmark?.mnemonic
         // ////////////////  准备数据  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：先定作用域（固定或选择），再开助记符对话框  start  ///
+        // ////////////////  核心逻辑：先定「作用域+分组」（固定或选择），再开助记符对话框  start  ///
         if (fixedScope != null) {
-            openMnemonicDialogAndAdd(project, fixedScope, location, prefillMnemonic, existingAtPosition)
+            // 不弹窗路径（原生快捷键接管）：目标分组 = 该作用域上次使用的分组，无记忆则默认「收藏」
+            val targetGroup = AddActionSupport.resolveTargetGroup(project, fixedScope)
+            openMnemonicDialogAndAdd(project, fixedScope, targetGroup, location, prefillMnemonic, existingAtPosition)
         } else {
-            AddScopeChooser.chooseScope(project) { scope ->
-                openMnemonicDialogAndAdd(project, scope, location, prefillMnemonic, existingAtPosition)
+            // 弹窗路径（编辑器/行号区/项目视图/标签页右键、工具窗口入口）：分组树一次选定「作用域+分组」
+            com.aogg.favorites.ui.ScopeGroupChooserPopup.chooseScopeAndGroup(project) { scope, group ->
+                openMnemonicDialogAndAdd(project, scope, group, location, prefillMnemonic, existingAtPosition)
             }
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**
-     * 打开助记符对话框并在确认后写入（作用域由调用方决定：固定作用域或弹窗选择）
+     * 打开助记符对话框并在确认后写入（「作用域+分组」由调用方决定：固定作用域读记忆或弹窗选择）
+     *
+     * @param targetGroup 目标分组名（写入收藏的 listName；作用域内已存在的分组）
      */
     private fun openMnemonicDialogAndAdd(
         project: Project,
         scope: FavoriteScope,
+        targetGroup: String,
         location: AddActionSupport.PendingLocation,
         prefillMnemonic: Char?,
         existingAtPosition: List<com.aogg.favorites.ui.ScopedBookmark>
@@ -175,15 +183,16 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         )
         if (!dialog.showAndGet()) return
         val selectedMnemonic = dialog.selectedMnemonic ?: return
-        performAdd(project, scope, location, selectedMnemonic, dialog.description, existingAtPosition)
+        performAdd(project, scope, targetGroup, location, selectedMnemonic, dialog.description, existingAtPosition)
     }
 
     /**
-     * 按所选作用域写入助记符收藏（替换旧助记符/占位符，与历史语义一致）
+     * 按所选「作用域+分组」写入助记符收藏（替换旧助记符/占位符，与历史语义一致）
      */
     private fun performAdd(
         project: Project,
         scope: FavoriteScope,
+        targetGroup: String,
         location: AddActionSupport.PendingLocation,
         selectedMnemonic: Char,
         description: String?,
@@ -213,14 +222,15 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：写入新助记符收藏（GLOBAL=绝对路径）  start  /////////
+        // ////////////////  核心逻辑：写入新助记符收藏（GLOBAL=绝对路径；listName=目标分组）  start  ///
         val bookmark = Bookmark(
             id = UUID.randomUUID().toString(),
             type = location.type,
             filePath = storagePath,
             lineNumber = location.lineNumber,
             mnemonic = selectedMnemonic,
-            description = description
+            description = description,
+            listName = targetGroup
         )
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
@@ -235,7 +245,8 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
             }
             Messages.showInfoMessage(
                 project,
-                "已添加助记符收藏 $mnemonicText$descText 到「${scope.label}」（$typeText）",
+                // 通知文案带目标分组路径（如「项目收藏/父组/子组」），与分组选择语义对应
+                "已添加助记符收藏 $mnemonicText$descText 到「${scope.label}/$targetGroup」（$typeText）",
                 "添加收藏成功"
             )
             BookmarkRefreshHelper.refreshAfterChange(project)

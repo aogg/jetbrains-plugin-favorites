@@ -23,13 +23,15 @@ import java.util.*
  *
  * 1.2.0 双作用域语义：
  * - 若目标位置在任一作用域已存在收藏 → 维持原有切换语义：直接移除并通知（不弹选择）；
- * - 否则弹出「项目收藏/全局收藏」二选一（默认高亮上次使用的作用域，选择后记住），
- *   加入 GLOBAL 时写入绝对路径；项目外位置只能加入 GLOBAL；
- * - 项目视图多选批量：只弹一次选择，全部加入同一作用域。
+ * - 否则弹出选择（1.5.x 升级为 [com.aogg.favorites.ui.ScopeGroupChooserPopup] 分组树：
+ *   默认高亮上次使用的「作用域+分组」，选择后记住），加入 GLOBAL 时写入绝对路径；
+ *   项目外位置只能加入 GLOBAL；
+ * - 项目视图多选批量：只弹一次选择，全部加入同一「作用域+分组」。
  *
  * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
  * 固定作用域入口（如原生 ToggleBookmark 委托、Ctrl+点击行号区手势）不弹作用域选择，
- * 直接按指定作用域（当前项目）执行；右键菜单等原入口行为不变。
+ * 直接按指定作用域执行；1.5.x 起目标分组取「该作用域上次使用的分组」，
+ * 无记忆/记忆已删除则回退默认「收藏」；右键菜单等原入口行为不变。
  */
 class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名收藏", null), ScopedAddAction {
 
@@ -161,23 +163,29 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：固定作用域 → 直接写入；否则弹作用域二选一  start  ///
+        // ////////////////  核心逻辑：固定作用域 → 读记忆直接写入；否则弹分组树选择  start  ///
         if (fixedScope != null) {
-            performAdd(project, fixedScope, candidates, toRemove, lineMode)
+            // 不弹窗路径（原生快捷键接管）：目标分组 = 该作用域上次使用的分组，无记忆则默认「收藏」
+            val targetGroup = AddActionSupport.resolveTargetGroup(project, fixedScope)
+            performAdd(project, fixedScope, targetGroup, candidates, toRemove, lineMode)
             return
         }
-        AddScopeChooser.chooseScope(project) { scope ->
-            performAdd(project, scope, candidates, toRemove, lineMode)
+        // 弹窗路径（编辑器/行号区/项目视图/标签页右键、工具窗口入口）：一次选择，全部加入同一「作用域+分组」
+        com.aogg.favorites.ui.ScopeGroupChooserPopup.chooseScopeAndGroup(project) { scope, group ->
+            performAdd(project, scope, group, candidates, toRemove, lineMode)
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**
-     * 将待新增位置加入所选作用域，并移除切换命中的已有收藏
+     * 将待新增位置加入所选「作用域+分组」，并移除切换命中的已有收藏
+     *
+     * @param targetGroup 目标分组名（作用域内已存在的分组；写入收藏的 listName）
      */
     private fun performAdd(
         project: Project,
         scope: FavoriteScope,
+        targetGroup: String,
         candidates: List<AddActionSupport.PendingLocation>,
         toRemove: List<com.aogg.favorites.ui.ScopedBookmark>,
         lineMode: Boolean
@@ -203,7 +211,8 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
                 filePath = storagePath,
                 lineNumber = location.lineNumber,
                 mnemonic = null,
-                description = null
+                description = null,
+                listName = targetGroup
             )
             if (manager.addBookmark(bookmark)) {
                 successCount++
@@ -213,7 +222,8 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
 
         // ////////////////  逻辑后：结果通知与刷新  start  //////////////////////////////
         val removeCount = toRemove.size
-        val scopeText = scope.label
+        // 通知文案带目标分组路径（如「项目收藏/父组/子组」），与分组选择语义对应
+        val scopeText = "${scope.label}/$targetGroup"
         val message = when {
             successCount > 0 && removeCount > 0 -> "已添加 $successCount 个收藏到「$scopeText」，移除 $removeCount 个收藏"
             successCount > 0 && candidates.size == 1 && lineMode ->

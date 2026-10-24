@@ -3,6 +3,7 @@ package com.aogg.favorites.action
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkType
 import com.aogg.favorites.model.FavoriteScope
+import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.model.GlobalBookmarkManager
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.ui.ScopedBookmark
@@ -16,8 +17,9 @@ import java.io.File
  *
  * 实现者：添加类收藏动作（[AddAnonymousBookmarkAction]/[AddMnemonicBookmarkAction]）。
  * - 原生书签快捷键接管路径（DelegateToFavoritesAction）固定为当前项目作用域，
- *   直接执行、不弹 [AddScopeChooser] 作用域二选一；
- * - 右键菜单等原入口仍走作用域选择（默认高亮并记住上次选择），行为不变。
+ *   直接执行、不弹 [com.aogg.favorites.ui.ScopeGroupChooserPopup] 分组树选择；
+ *   目标分组取「该作用域上次使用的分组」，无记忆/记忆已删除则回退默认「收藏」（[resolveTargetGroup]）；
+ * - 右键菜单等原入口仍走分组树选择（默认高亮并记住上次选择），行为不变。
  */
 interface ScopedAddAction {
 
@@ -102,6 +104,31 @@ object AddActionSupport {
     fun storagePathFor(scope: FavoriteScope, location: PendingLocation): String? = when (scope) {
         FavoriteScope.PROJECT -> location.relativePath
         FavoriteScope.GLOBAL -> location.absolutePath
+    }
+
+    /**
+     * 解析作用域的有效目标分组（1.5.x 分组选择新增）
+     *
+     * 读取「该作用域上次使用的分组」记忆（FavoritesSettings.lastGroupPerScope，与 lastAddScope 同一存储）；
+     * 记忆为空或分组已被删除时回退默认列表 [com.aogg.favorites.model.Bookmark.DEFAULT_LIST_NAME]。
+     * 供原生快捷键接管路径（不弹窗）与分组树弹窗的默认选中共用，存在性检测以当前管理器为准。
+     *
+     * @param project 当前项目（PROJECT 作用域解析管理器需要）
+     * @param scope 目标作用域
+     * @return 有效目标分组名（恒为该作用域下已存在的分组）
+     */
+    fun resolveTargetGroup(project: Project, scope: FavoriteScope): String {
+        // ////////////////  准备数据：读取记忆中的上次分组  start  ///////////////////////
+        val remembered = runCatching {
+            com.aogg.favorites.settings.FavoritesSettings.getInstance().getLastGroupForScope(scope)
+        }.getOrNull()
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：记忆有效则用之，否则回退默认列表  start  ////////////
+        val manager = FavoritesScopeResolver.managerFor(project, scope)
+        val rememberedValid = remembered != null && runCatching { manager.hasList(remembered) }.getOrDefault(false)
+        return if (rememberedValid) remembered!! else com.aogg.favorites.model.Bookmark.DEFAULT_LIST_NAME
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
     }
 
     /**
