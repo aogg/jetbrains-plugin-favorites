@@ -168,8 +168,9 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                 }
             }
             // 兜底：未识别节点类型（分支漏配/新增节点类型未配时）给通用图标 + toString 主文本，保证任何节点都有图标可显示
+            // （通用文件图标常量在 2023.3 SDK 中为 FileTypes.Any_type，对应通用「任一文件类型」图标）
             else -> {
-                icon = AllIcons.FileTypes.Any
+                icon = AllIcons.FileTypes.Any_type
                 append(node?.toString() ?: "")
             }
         }

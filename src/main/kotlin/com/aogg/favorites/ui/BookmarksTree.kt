@@ -14,6 +14,7 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.Separator
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
@@ -22,7 +23,7 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
-import com.intellij.openapi.util.Disposable
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
@@ -1348,14 +1349,31 @@ class BookmarksTree(
             VirtualFileManager.getInstance().addVirtualFileListener(object : VirtualFileListener {
                 override fun contentChanged(event: VirtualFileEvent) {
                     if (project.isDisposed) return
-                    scheduleLineRefreshForPath(event.file.path)
+                    // VFS 事件可能在非 EDT 线程触发（同步刷新等），统一转发 EDT 处理（防抖集合/树访问仅 EDT）
+                    runOnEdt { scheduleLineRefreshForPath(event.file.path) }
                 }
 
                 override fun fileDeleted(event: VirtualFileEvent) {
-                    dropLineContentCache(event.file.path)
+                    runOnEdt { dropLineContentCache(event.file.path) }
                 }
             }, lineContentDisposable)
         }.onFailure { log.warn("注册文件内容变更监听失败", it) }
+    }
+
+    /**
+     * 在 EDT 执行动作（已在 EDT 直接执行，否则 invokeLater 转发；项目已关闭时忽略）
+     *
+     * @param action 待执行动作
+     */
+    private fun runOnEdt(action: () -> Unit) {
+        val application = ApplicationManager.getApplication() ?: return
+        if (application.isDispatchThread) {
+            action()
+        } else {
+            application.invokeLater {
+                if (!project.isDisposed) action()
+            }
+        }
     }
 
     /**
@@ -1473,7 +1491,7 @@ class BookmarksTree(
      * @param node 当前树节点
      * @param action 节点访问动作
      */
-    private inline fun walkTreeNodes(node: DefaultMutableTreeNode, action: (DefaultMutableTreeNode) -> Unit) {
+    private fun walkTreeNodes(node: DefaultMutableTreeNode, action: (DefaultMutableTreeNode) -> Unit) {
         action(node)
         for (i in 0 until node.childCount) {
             walkTreeNodes(node.getChildAt(i) as DefaultMutableTreeNode, action)
