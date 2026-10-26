@@ -4,7 +4,6 @@ import com.aogg.favorites.helper.BookmarkIconHelper
 import com.aogg.favorites.model.RuleType
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
-import com.intellij.icons.AllIcons
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -25,19 +24,23 @@ import javax.swing.tree.TreeCellRenderer
  * - 绕开平台 ColoredTreeCellRenderer.rendererComponentInner 胶水层（其内部对宽选/焦点边框/isForPainting
  *   的处理链在第三方主题/图标插件环境下有被接管清空图标的先例），改由本类自管完整渲染时序：
  *   clear → 字体/选中态配色 → customize（按节点类型设图标与文本）→ 图标兜底 → 速度搜索高亮 → 返回自身
- * - 行内容非空必有图标（双重兜底）：
- *   1) getTreeCellRendererComponent 尾部 icon==null 时补 AllIcons.FileTypes.Any_type
- *   2) paintComponent 绘制前 icon==null 且已有文本片段时补 AllIcons.FileTypes.Any_type
+ * - 1.5.x 起图标全量字符绘制（[CharIcon]）：历史 4 次图标加固（换 AllIcons 常量/渲染器直接实现/
+ *   绘制级兜底/运行时取证）在用户环境下全部无效，判断为 AllIcons / SVG / 文件类型图标的整条平台
+ *   加载链被第三方主题/图标插件接管清空；字符绘制不走任何图标加载链（paintIcon 直接 drawString），
+ *   主题/第三方插件无法清空字符，从根上绕开该问题。各节点字符语义见 customize 各分支注释
+ * - 行内容非空必有图标（双重兜底，兜底图标同为字符 📄）：
+ *   1) getTreeCellRendererComponent 尾部 icon==null 时补 CharIcon.of("📄")
+ *   2) paintComponent 绘制前 icon==null 且已有文本片段时补 CharIcon.of("📄")
  *      （绘制级保险：即使存在任何胶水层在渲染后清图标，绘制时也会补回）
  * - 选中态背景/前景与 ColoredTreeCellRenderer 非宽选路径语义一致（RenderingUtil 取树当前配色，不写死色值）
  * - 速度搜索高亮沿用 SpeedSearchUtil.applySpeedSearchHighlightingFiltered（主文本参与匹配，行为同平台）
  * - 运行时取证日志（idea.log 搜 FavoritesTree 前缀）：
  *   安装时 BookmarksTree 记 renderer 是否真实生效；本渲染器前 [DIAGNOSTIC_LOG_LIMIT] 次调用逐次记
  *   节点/图标信息；若发现 this !== tree.getCellRenderer()（第三方插件运行时换走 renderer）只报一次
- *   error——这是定位「树节点无图标」的最关键证据
+ *   error——继续留证观察字符图标方案下树节点是否仍有异常
  * 各节点 toString 返回主文本，作为 TreeSpeedSearch 的匹配文本（灰色说明文字不参与速度搜索）
  *
- * @param project 项目（解析 VirtualFile 计算文件类型图标）
+ * @param project 项目（解析 VirtualFile 计算文件图标）
  */
 class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredComponent(), TreeCellRenderer {
 
@@ -80,7 +83,7 @@ class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredCom
         customize(tree, value)
         // 兜底一：任何分支漏配/图标解析失败时保底通用图标（与 customize 各分支设 icon 语义衔接）
         if (icon == null) {
-            icon = AllIcons.FileTypes.Any_type
+            icon = CharIcon.of("📄")
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
@@ -98,7 +101,7 @@ class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredCom
      */
     override fun paintComponent(g: Graphics) {
         if (icon == null && fragmentCount > 0) {
-            icon = AllIcons.FileTypes.Any_type
+            icon = CharIcon.of("📄")
         }
         super.paintComponent(g)
     }
@@ -122,12 +125,12 @@ class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredCom
             }
             // 列表节点（含收藏数徽标文案）
             is BookmarkListNode -> {
-                icon = AllIcons.Nodes.Folder
+                icon = CharIcon.of("🗂️")
                 append(node.toString())
             }
-            // 目录节点：虚拟目录链/文件夹收藏/真实目录（展开折叠态同用文件夹图标）
+            // 目录节点：虚拟目录链/文件夹收藏/真实目录（缺失态 ⚠️，正常态 📁，展开折叠态同用）
             is DirNode -> {
-                icon = if (node.missing) AllIcons.General.Error else AllIcons.Nodes.Folder
+                icon = if (node.missing) CharIcon.of("⚠️") else CharIcon.of("📁")
                 val bookmark = node.bookmark
                 if (bookmark?.mnemonic != null) {
                     append(BookmarkIconHelper.getMnemonicText(bookmark.mnemonic) + " ")
@@ -185,15 +188,15 @@ class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredCom
             }
             // 规则匹配根节点（第三个根节点，1.4.0）
             is RulesRootNode -> {
-                icon = AllIcons.Nodes.Folder
+                icon = CharIcon.of("🧩")
                 append(node.toString())
             }
-            // 规则节点：按类型给图标 + 状态后缀（ERROR 时 tooltip=失败原因，1.4.0）
+            // 规则节点：按类型给字符图标（正则 🔍 / 数据库 🗄️ / 终端 🖥️）+ 状态后缀（ERROR 时 tooltip=失败原因，1.4.0）
             is RuleNode -> {
                 icon = when (node.rule.type) {
-                    RuleType.REGEX -> AllIcons.Actions.Regex
-                    RuleType.SQL -> AllIcons.Nodes.DataTables
-                    RuleType.SSH -> AllIcons.Nodes.Console
+                    RuleType.REGEX -> CharIcon.of("🔍")
+                    RuleType.SQL -> CharIcon.of("🗄️")
+                    RuleType.SSH -> CharIcon.of("🖥️")
                 }
                 append(node.rule.name)
                 when (node.status) {
@@ -208,7 +211,7 @@ class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredCom
                 // ERROR：tooltip 展示失败原因（其余节点保持无 tooltip）
                 toolTipText = node.error?.takeIf { it.isNotBlank() }
             }
-            // 规则结果条目节点（1.4.0）：FileItem=文件类型图标（文件名+灰色父路径）；RowItem/LineItem=文档图标
+            // 规则结果条目节点（1.4.0）：FileItem=按扩展名映射文件图标（文件名+灰色父路径）；RowItem/LineItem=通用文档 📄
             is RuleItemNode -> {
                 when (val item = node.item) {
                     is RuleItem.FileItem -> {
@@ -224,19 +227,18 @@ class BookmarksTreeCellRenderer(private val project: Project) : SimpleColoredCom
                         }
                     }
                     is RuleItem.RowItem -> {
-                        icon = AllIcons.FileTypes.Text
+                        icon = CharIcon.of("📄")
                         append(node.toString())
                     }
                     is RuleItem.LineItem -> {
-                        icon = AllIcons.FileTypes.Text
+                        icon = CharIcon.of("📄")
                         append(node.toString())
                     }
                 }
             }
-            // 兜底：未识别节点类型（分支漏配/新增节点类型未配时）给通用图标 + toString 主文本，保证任何节点都有图标可显示
-            // （通用文件图标常量在 2023.3 SDK 中为 FileTypes.Any_type，对应通用「任一文件类型」图标）
+            // 兜底：未识别节点类型（分支漏配/新增节点类型未配时）给通用字符图标 + toString 主文本，保证任何节点都有图标可显示
             else -> {
-                icon = AllIcons.FileTypes.Any_type
+                icon = CharIcon.of("📄")
                 append(node?.toString() ?: "")
             }
         }
