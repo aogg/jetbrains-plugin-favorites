@@ -2,43 +2,47 @@ package com.aogg.favorites.helper
 
 import com.aogg.favorites.model.BookmarkType
 import com.aogg.favorites.model.FavoriteScope
-import com.aogg.favorites.ui.CharIcon
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.fileTypes.FileTypeManager
+import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.vfs.VirtualFile
-import java.util.Locale
 import javax.swing.Icon
 
 /**
  * 收藏图标管理助手
- * 提供匿名收藏、助记符收藏、作用域（1.2.0）、类型分组（1.2.0）、按扩展名文件图标（1.3.0 引入，1.5.x 字符化）
+ * 提供匿名收藏、助记符收藏、作用域（1.2.0）、类型分组（1.2.0）、文件类型图标（1.3.0）
  *
- * 1.5.x 图标全量字符化说明（重要，勿删）：
- * - 历史 4 次图标加固（换 AllIcons 常量/渲染器直接实现/绘制级兜底/运行时取证）在用户环境下全部无效，
- *   判断为 AllIcons / SVG / 文件类型图标（FileTypeManager）的整条平台加载链被第三方主题/图标插件接管清空；
- * - 本类返回值类型保持 [Icon] 不变（调用点签名不动），实现全量换成 [CharIcon] 字符绘制：
- *   paintIcon 直接 drawString，不走任何图标加载链，主题/第三方插件无法清空字符，从根上绕开该问题；
- * - 助记符图标直接显示字母/数字本身（比原来统一书签图标信息量更大）；
- * - 文件图标改为按扩展名映射字符（目录优先判定），不再依赖 FileTypeManager / UnknownFileType。
+ * 图标选型说明（基于 PhpStorm 2023.3 实测可用常量）：
+ * - 全局作用域：AllIcons.Nodes.Palette 在 2023.3 不存在，改用 AllIcons.General.Web（地球图标，语义最接近"全局"）；
+ * - 文件类型组：AllIcons.Nodes.FileText 在 2023.3 不存在，改用 AllIcons.FileTypes.Text（文档图标）；
+ * - 树中文件节点：1.3.0 起改用 IDE 文件类型图标（.php/.bat/.sql 等按扩展名自然区分）。
  */
 object BookmarkIconHelper {
 
     /**
-     * 匿名收藏图标（字符书签 🔖，不走图标加载链）
+     * 匿名收藏图标（使用 IntelliJ 内置图标）
      */
-    val ANONYMOUS_ICON: Icon = CharIcon.of("🔖")
+    val ANONYMOUS_ICON: Icon = AllIcons.Gutter.Bookmark
 
     /**
      * 获取助记符收藏图标
-     * 1.5.x 起直接把助记符字母/数字本身绘制成图标（信息量优于原统一书签图标）
+     * 使用带框的字母/数字图标
      *
      * @param mnemonic 助记符（0-9 或 A-Z）
      * @return 图标
      */
     fun getMnemonicIcon(mnemonic: Char): Icon {
-        return CharIcon.of(mnemonic.toString())
+        // 使用 IntelliJ 内置的带框图标
+        // 对于数字，使用数字图标；对于字母，使用字母图标
+        return when {
+            mnemonic in '0'..'9' -> AllIcons.Gutter.Bookmark
+            mnemonic in 'A'..'Z' -> AllIcons.Gutter.Bookmark
+            else -> AllIcons.Gutter.Bookmark
+        }
     }
 
     /**
-     * 获取助记符文本（用于显示在图标旁）
+     * 获取助记符文本（用于显示在图标上）
      *
      * @param mnemonic 助记符
      * @return 显示文本（如 "[1]" 或 "[A]"）
@@ -50,57 +54,57 @@ object BookmarkIconHelper {
     /**
      * 获取作用域节点图标（树第一层 / 弹窗分组用）
      *
-     * @param scope 作用域（项目=打开目录夹 📂；全局=地球 🌐）
+     * @param scope 作用域（项目=项目图标；全局=地球图标）
      */
     fun getScopeIcon(scope: FavoriteScope): Icon = when (scope) {
-        FavoriteScope.PROJECT -> CharIcon.of("📂")
-        FavoriteScope.GLOBAL -> CharIcon.of("🌐")
+        FavoriteScope.PROJECT -> AllIcons.Nodes.Project
+        FavoriteScope.GLOBAL -> AllIcons.General.Web
     }
 
     /**
      * 获取收藏类型分组图标（树第三层类型组 / 收藏节点按类型用）
      *
-     * @param type 收藏类型（行=书签 🔖；文件=文档 📄；文件夹=目录夹 📁）
+     * @param type 收藏类型（行=书签图标；文件=文档图标；文件夹=文件夹图标）
      */
     fun getTypeIcon(type: BookmarkType): Icon = when (type) {
-        BookmarkType.LINE -> CharIcon.of("🔖")
-        BookmarkType.FILE -> CharIcon.of("📄")
-        BookmarkType.FOLDER -> CharIcon.of("📁")
+        BookmarkType.LINE -> AllIcons.Gutter.Bookmark
+        BookmarkType.FILE -> AllIcons.FileTypes.Text
+        BookmarkType.FOLDER -> AllIcons.Nodes.Folder
     }
 
     /**
-     * 获取树中文件节点图标（1.5.x 字符化）：
-     * 目录（virtualFile?.isDirectory 为 true）返回 📁；
-     * 其余按文件名扩展名映射字符图标，无命中（无扩展名/未知扩展名）兜底 📄。
-     * 不再依赖 virtualFile.fileType / FileTypeManager（图标加载链已被接管，不可用）
+     * 获取树中文件节点图标（1.3.0 PhpStorm 风格树）：
+     * 优先使用有效 VirtualFile 的文件类型图标（不同扩展名 .php/.bat/.sql 等自然区分）；
+     * 离线/文件不存在时按文件名推断文件类型图标；再兜底任意文件图标
      *
-     * @param virtualFile 已解析的虚拟文件（可为 null=离线/不存在，此时按文件名推断）
-     * @param fileName 文件名（扩展名映射依据）
+     * @param virtualFile 已解析的虚拟文件（可为 null=离线/不存在）
+     * @param fileName 文件名（兜底推断用）
      * @return 文件图标
      */
     fun getFileIcon(virtualFile: VirtualFile?, fileName: String): Icon {
-        // ////////////////  优先：目录判定（文件夹收藏/真实目录统一 📁）  start  ////////////////
-        if (virtualFile?.isDirectory == true) {
-            return CharIcon.of("📁")
+        // ////////////////  优先：有效 VirtualFile 的文件类型图标  start  ////////////////
+        if (virtualFile != null && virtualFile.isValid) {
+            try {
+                return virtualFile.fileType.icon
+            } catch (e: Exception) {
+                // 文件类型解析异常时走文件名推断兜底
+            }
         }
-        // ////////////////  优先  end  //////////////////////////////////////////////////////
+        // ////////////////  优先  end  //////////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：按扩展名映射字符图标（Locale.ROOT 避免土耳其语 i 陷阱）  /
-        return when (fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
-            "php" -> CharIcon.of("🐘")
-            "sql" -> CharIcon.of("🗄️")
-            "java" -> CharIcon.of("☕")
-            "kt", "kts" -> CharIcon.of("K")
-            "js", "mjs", "cjs" -> CharIcon.of("🟨")
-            "ts", "tsx" -> CharIcon.of("🔷")
-            "html", "htm", "vue" -> CharIcon.of("🐥")
-            "css", "scss", "less" -> CharIcon.of("🎨")
-            "md", "markdown" -> CharIcon.of("📝")
-            "bat", "cmd", "sh", "bash", "ps1" -> CharIcon.of("📜")
-            "xml", "json", "yaml", "yml", "toml", "properties", "conf", "ini" -> CharIcon.of("🧾")
-            // 无扩展名/未知扩展名兜底：通用文档 📄
-            else -> CharIcon.of("📄")
+        // ////////////////  兜底一：按文件名推断文件类型图标  start  //////////////////////
+        val fileTypeByFileName = try {
+            FileTypeManager.getInstance().getFileTypeByFileName(fileName)
+        } catch (e: Exception) {
+            null
         }
-        // ////////////////  核心逻辑  end  //////////////////////////////////////////////////
+        if (fileTypeByFileName != null && fileTypeByFileName !== UnknownFileType.INSTANCE) {
+            return fileTypeByFileName.icon
+        }
+        // ////////////////  兜底一  end  //////////////////////////////////////////////////
+
+        // ////////////////  兜底二：任意文件图标（2023.3 常量为 Any_type）  start  ///////////
+        return AllIcons.FileTypes.Any_type
+        // ////////////////  兜底二  end  //////////////////////////////////////////////////
     }
 }

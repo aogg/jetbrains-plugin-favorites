@@ -233,6 +233,12 @@
 - 行内容非空必有图标的双重兜底：渲染尾部 + `paintComponent` 绘制级保险（均补通用图标），任何情况下不被清掉
 - 运行时取证日志：idea.log 搜 `FavoritesTree`——renderer 安装校验、前 30 次渲染节流日志、渲染器被第三方运行时替换时只报一次 error
 
+### ✅ v1.5.2：树图标修复（已完成）
+
+- 定位并修复 1.3.0~1.5.1 全树无图标的真正根因：`BookmarksTree`（JTree 子类）内部裸写 `cellRenderer = renderer` 被 Kotlin 编译成直接写 JTree 的 protected 字段（putfield），不触发 `CELL_RENDERER_PROPERTY` 变更事件，树 UI 构造期缓存的 `currentCellRenderer` 始终是 `NodeRenderer`（只用节点 `toString` 画文本、不设图标），自定义渲染器从未参与绘制；改为 `setCellRenderer(renderer)` 后图标恢复正常
+- 渲染器与图标助手回退为 1.5.0 的原生 IDE 图标实现（`ColoredTreeCellRenderer` + `AllIcons.Nodes.*`/`General.*`/文件类型图标，兜底 `AllIcons.FileTypes.Any_type`）；移除基于错误根因的 `CharIcon` 字符图标绕行方案
+- `ScopeGroupChooserPopup` 的分组选择树同步改为显式 `setCellRenderer`，避免同类陷阱
+
 ## 项目结构
 
 ```

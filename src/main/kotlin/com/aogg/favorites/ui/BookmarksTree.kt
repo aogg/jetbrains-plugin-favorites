@@ -409,7 +409,11 @@ class BookmarksTree(
         showsRootHandles = true
         model = DefaultTreeModel(DefaultMutableTreeNode("root"))
         val renderer = BookmarksTreeCellRenderer(project)
-        cellRenderer = renderer
+        // 必须调用 setCellRenderer：在 JTree 子类内部裸写 `cellRenderer =`，Kotlin 会编译成直接写
+        // JTree 的 protected 字段（putfield），不触发 CELL_RENDERER_PROPERTY 变更事件，
+        // 树 UI（BasicTreeUI/DefaultTreeUI）在构造期缓存的 currentCellRenderer 一直是 NodeRenderer，
+        // 自定义渲染器永远不参与绘制（1.3.0~1.5.1 全树无图标的真正原因）。
+        setCellRenderer(renderer)
         // 安装取证（idea.log 搜 FavoritesTree）：对比设置值与 getCellRenderer() 实际返回，
         // 若两者类名不一致说明存在第三方胶水层在构造期换走 renderer
         log.info(

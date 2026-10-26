@@ -110,7 +110,9 @@ object ScopeGroupChooserPopup {
             isRootVisible = false
             showsRootHandles = true
             selectionModel.selectionMode = javax.swing.tree.TreeSelectionModel.SINGLE_TREE_SELECTION
-            cellRenderer = ScopeGroupNodeRenderer()
+            // 显式调用 setCellRenderer（此处虽非 JTree 子类内部，仍统一写法避免同类"裸字段赋值不触发
+            // property change"陷阱）
+            setCellRenderer(ScopeGroupNodeRenderer())
             // 自带输入过滤：连续键入即按路径前置匹配并选中
             addKeyListener(TypeAheadSelector(this))
             installDoubleClickConfirm(this)
