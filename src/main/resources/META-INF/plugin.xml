@@ -215,12 +215,19 @@
     </extensions>
 
     <actions>
-        <!-- 收藏子菜单：编辑器右键 / 行号区右键 / 项目视图右键 / 编辑器标签页右键，均置底 -->
+        <!-- 收藏子菜单：编辑器右键 / 行号区右键 / 项目视图右键 / 编辑器标签页右键 / 导航栏右键，均置底 -->
         <group id="Favorites.Group" text="收藏" description="Favorites 收藏菜单" icon="AllIcons.Gutter.Bookmark" popup="true">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
             <add-to-group group-id="EditorGutterPopupMenu" anchor="last"/>
             <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+            <!-- 导航栏（文件路径导航条，平台 LangActions.xml 自带 NavbarPopupMenu 组）右键；
+                 编辑器内面包屑右键为平台硬编码（无动作组/扩展点），不可注入，故不注册 -->
+            <add-to-group group-id="NavbarPopupMenu" anchor="last"/>
+
+            <!-- 收藏文件夹/收藏文件（直捷动作）：文案按选中类型动态显示（收藏文件夹/收藏文件/收藏） -->
+            <action id="Favorites.AddFavorite" class="com.aogg.favorites.action.AddFileFolderFavoriteAction"
+                    text="收藏" description="收藏选中的文件/文件夹：弹出「作用域+分组」选择（默认记住上次选择，多选批量一次）；已收藏的位置则切换移除"/>
 
             <action id="Favorites.AddAnonymousBookmark" class="com.aogg.favorites.action.AddAnonymousBookmarkAction"
                     text="添加匿名收藏" description="添加/移除匿名收藏">
@@ -230,11 +237,12 @@
                     text="添加助记符收藏" description="添加/移除助记符收藏">
                 <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
             </action>
-
-            <!-- 导入原生书签（阶段B） -->
-            <action id="Favorites.ImportNativeBookmarks" class="com.aogg.favorites.nativebookmarks.ImportNativeBookmarksAction"
-                    text="导入原生书签" description="导入 PhpStorm 原生书签到收藏列表（自动去重，可重复执行）"/>
         </group>
+
+        <!-- 导入原生书签（原 Favorites.Group 内动作，已收编为顶层动作）：不加入任何组 → 不出现在右键"收藏"子菜单，
+             仍可通过「查找操作 Ctrl+Shift+A」与收藏工具窗口工具栏按钮（按 id 调用，与组位置无关）使用 -->
+        <action id="Favorites.ImportNativeBookmarks" class="com.aogg.favorites.nativebookmarks.ImportNativeBookmarksAction"
+                text="导入原生书签" description="导入 PhpStorm 原生书签到收藏列表（自动去重，可重复执行）"/>
 
         <!-- 全局动作 -->
         <action id="Favorites.ToggleBookmarksToolWindow" class="com.aogg.favorites.action.ToggleBookmarksToolWindowAction"

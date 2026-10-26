@@ -106,8 +106,11 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
 
     /**
      * 处理项目窗口上下文（文件/文件夹收藏，支持多选批量）
+     *
+     * internal：供 [AddFileFolderFavoriteAction]（收藏文件夹/收藏文件直捷动作）复用同一流程，
+     * 保证「收藏」与「添加匿名收藏」的文件上下文行为完全一致；本类既有入口行为不变。
      */
-    private fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>, fixedScope: FavoriteScope?) {
+    internal fun handleProjectContext(project: Project, virtualFiles: Array<VirtualFile>, fixedScope: FavoriteScope?) {
         val locations = virtualFiles.map { AddActionSupport.locationOf(project, it, -1) }
         processLocations(project, locations, lineMode = false, fixedScope = fixedScope)
     }
@@ -170,7 +173,7 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
             performAdd(project, fixedScope, targetGroup, candidates, toRemove, lineMode)
             return
         }
-        // 弹窗路径（编辑器/行号区/项目视图/标签页右键、工具窗口入口）：一次选择，全部加入同一「作用域+分组」
+        // 弹窗路径（编辑器/行号区/项目视图/标签页/导航栏右键、收藏直捷动作、工具窗口入口）：一次选择，全部加入同一「作用域+分组」
         com.aogg.favorites.ui.ScopeGroupChooserPopup.chooseScopeAndGroup(project) { scope, group ->
             performAdd(project, scope, group, candidates, toRemove, lineMode)
         }
