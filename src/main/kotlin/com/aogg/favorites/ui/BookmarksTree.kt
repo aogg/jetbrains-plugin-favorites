@@ -307,6 +307,9 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  * - 文件收藏(FILE)即文件节点本体；同路径 FILE+LINE 收藏合并为一个文件节点
  * - 文件夹收藏(FOLDER)为虚拟目录链上带收藏标记的目录节点，首次展开懒加载真实子文件/子文件夹
  *   （含未收藏项，深层逐级懒加载）；目录不存在/不可读显示缺失态（红叉）
+ * - 展开能力的模型前提（1.6.0 修复）：DefaultTreeModel 显式 asksAllowsChildren=true，isLeaf 以节点
+ *   allowsChildren 为准——无子节点的目录/文件夹收藏节点仍可展开（懒加载触发的前提）；
+ *   叶子类节点（纯文件收藏/行收藏/未收藏真实文件/规则条目）显式 allowsChildren=false 不出空展开把手
  *
  * 规则匹配（1.4.0）：第一层追加第三个根节点「规则匹配」（排在全局收藏之后，始终显示）：
  * - 规则匹配根 → 规则节点（名称+状态后缀 ✅ M / ⏳ 执行中 / ❌，ERROR tooltip=失败原因）→ 结果条目节点
@@ -386,6 +389,9 @@ class BookmarksTree(
     /** 行内容缓存：文件绝对路径（正斜杠规范）→（行号 → 行文本；null=空白行/读取失败，显示时回退收藏描述）。仅 EDT 访问 */
     private val lineContentCache = HashMap<String, HashMap<Int, String?>>()
 
+    /** 已做过 VFS 同步刷新兜底的绝对路径集合（每路径只试一次，防过滤输入等高频刷新反复触盘；并发安全） */
+    private val vfsRefreshTriedPaths: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /** 进行中的异步行内容加载请求键（缓存键#行号，防同一位置重复调度后台加载） */
     private val pendingLineLoadKeys = HashSet<String>()
 
@@ -407,7 +413,10 @@ class BookmarksTree(
     init {
         isRootVisible = false
         showsRootHandles = true
-        model = DefaultTreeModel(DefaultMutableTreeNode("root"))
+        // asksAllowsChildren 必须显式为 true：isLeaf 以节点 allowsChildren 为准（无子节点的目录仍是可展开节点）。
+        // 默认 false 时「无子节点一律判为叶子、不出展开把手」，懒加载（treeWillExpand）永远无触发机会——
+        // 1.3.0 起文件夹收藏/深层虚拟目录从未真正可展开的根因（1.6.0 修复）
+        model = DefaultTreeModel(DefaultMutableTreeNode("root"), true)
         val renderer = BookmarksTreeCellRenderer(project)
         // 必须调用 setCellRenderer：在 JTree 子类内部裸写 `cellRenderer =`，Kotlin 会编译成直接写
         // JTree 的 protected 字段（putfield），不触发 CELL_RENDERER_PROPERTY 变更事件，
@@ -507,6 +516,9 @@ class BookmarksTree(
             }
             // ////////////////  第二层  end  ///////////////////////////////////////////
 
+            // 空作用域（无任何分组）保持叶子语义，不出空展开把手（asksAllowsChildren=true 后需显式标记）
+            scopeNode.allowsChildren = scopeNode.childCount > 0
+
             root.add(scopeNode)
         }
         // ////////////////  第一层  end  ////////////////////////////////////////////////
@@ -517,7 +529,8 @@ class BookmarksTree(
 
         // ////////////////  逻辑后：替换模型并恢复展开态  start  /////////////////////////
         listSpines = spines
-        model = DefaultTreeModel(root)
+        // asksAllowsChildren=true 与 init 构造保持一致：无子节点的目录不判为叶子，展开把手与懒加载可用
+        model = DefaultTreeModel(root, true)
         for (scopeChild in root.children()) {
             restoreExpansion(scopeChild as DefaultMutableTreeNode, expandedDirKeys)
         }
@@ -618,6 +631,11 @@ class BookmarksTree(
         }
         // ////////////////  核心逻辑二  end  ////////////////////////////////////////
 
+        // ////////////////  逻辑后：空分组保持叶子语义（不出空展开把手）  start  ///////////
+        // 无子分组且自身收藏骨架为空时标记为叶子（asksAllowsChildren=true 后 isLeaf 以 allowsChildren 为准）
+        listNode.allowsChildren = listNode.childCount > 0
+        // ////////////////  逻辑后  end  ///////////////////////////////////////////
+
         // ////////////////  逻辑后：过滤后无命中时整体隐藏  start  ////////////////////
         if (query.isNotEmpty() && !selfPass && visibleBookmarks.isEmpty() && !hasVisibleChild) {
             return false
@@ -669,10 +687,13 @@ class BookmarksTree(
                     status = result?.status,
                     count = items.size,
                     error = result?.error
-                )
+                ),
+                // 无可见条目的规则保持叶子语义，不出空展开把手
+                visibleItems.isNotEmpty()
             )
             for (item in visibleItems) {
-                ruleTreeNode.add(DefaultMutableTreeNode(RuleItemNode(rule.id, item)))
+                // 规则条目为叶子节点（不可展开）
+                ruleTreeNode.add(DefaultMutableTreeNode(RuleItemNode(rule.id, item), false))
             }
             rootNode.add(ruleTreeNode)
         }
@@ -1242,11 +1263,13 @@ class BookmarksTree(
         resolveByAbsolutePath(path, absolute = scope == FavoriteScope.GLOBAL)
 
     /**
-     * 按路径与绝对性解析虚拟文件（统一入口，供收藏/节点两类解析复用）
+     * 按路径与绝对性解析虚拟文件（统一入口，供收藏/节点两类解析复用）：
+     * 先查 VFS 缓存；未命中时做「每路径一次」的同步刷新兜底——目录真实存在但从未进 VFS 的收藏
+     * （全局作用域/导入收编/IDE 重启后）也能解析出节点，避免误显示缺失态红叉、保证文件夹收藏可展开
      *
      * @param path 路径字符串
      * @param absolute 是否绝对路径语义
-     * @return 虚拟文件或 null
+     * @return 虚拟文件或 null（路径不存在或兜底不可用）
      */
     private fun resolveByAbsolutePath(path: String, absolute: Boolean): VirtualFile? {
         // ////////////////  准备数据：换算绝对路径  start  //////////////////////////////
@@ -1258,9 +1281,20 @@ class BookmarksTree(
         }
         // ////////////////  准备数据  end  ////////////////////////////////////////////
 
-        // ////////////////  返回：查 VFS 缓存（findFileByPath 需正斜杠风格路径）  start  //
-        return LocalFileSystem.getInstance().findFileByPath(absolutePath.replace('\\', '/'))
-        // ////////////////  返回  end  ////////////////////////////////////////////////
+        // ////////////////  核心逻辑一：查 VFS 缓存（findFileByPath 需正斜杠风格路径）  start  //
+        val normalizedPath = absolutePath.replace('\\', '/')
+        LocalFileSystem.getInstance().findFileByPath(normalizedPath)?.let { return it }
+        // ////////////////  核心逻辑一  end  ///////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：VFS 未收录时同步刷新兜底  start  ///////////////////
+        // read/write action 内禁止同步刷新（平台断言），自动跳过；每路径只尝试一次防高频触盘
+        val application = ApplicationManager.getApplication() ?: return null
+        if (application.isReadAccessAllowed || application.isWriteAccessAllowed) return null
+        if (!vfsRefreshTriedPaths.add(normalizedPath)) return null
+        return runCatching {
+            LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(normalizedPath))
+        }.onFailure { log.warn("VFS 同步刷新兜底失败：$normalizedPath", it) }.getOrNull()
+        // ////////////////  核心逻辑二  end  ///////////////////////////////////////////
     }
 
     /**
@@ -1344,13 +1378,15 @@ class BookmarksTree(
             fileBookmark = entry.fileBookmark,
             lineBookmarks = entry.lineBookmarks.toList()
         )
-        val treeNode = DefaultMutableTreeNode(fileNode)
+        val treeNode = DefaultMutableTreeNode(fileNode, entry.lineBookmarks.isNotEmpty())
 
         // ////////////////  核心逻辑：行收藏子节点（"行号: 行内容"，EDT 安全解析+异步兜底）  start
         for (lineBookmark in entry.lineBookmarks) {
+            // 行收藏为叶子节点（不可展开，不出空展开把手）
             treeNode.add(
                 DefaultMutableTreeNode(
-                    LineEntryNode(scope, listName, lineBookmark, resolveLineContent(lineBookmark))
+                    LineEntryNode(scope, listName, lineBookmark, resolveLineContent(lineBookmark)),
+                    false
                 )
             )
         }
@@ -1663,7 +1699,8 @@ class BookmarksTree(
                             )
                         )
                     } else {
-                        DefaultMutableTreeNode(RealFileNode(child))
+                        // 未收藏真实文件为叶子节点（不可展开）
+                        DefaultMutableTreeNode(RealFileNode(child), false)
                     }
                     treeNode.add(childTreeNode)
                 }

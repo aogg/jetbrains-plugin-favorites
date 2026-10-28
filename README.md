@@ -239,6 +239,13 @@
 - 渲染器与图标助手回退为 1.5.0 的原生 IDE 图标实现（`ColoredTreeCellRenderer` + `AllIcons.Nodes.*`/`General.*`/文件类型图标，兜底 `AllIcons.FileTypes.Any_type`）；移除基于错误根因的 `CharIcon` 字符图标绕行方案
 - `ScopeGroupChooserPopup` 的分组选择树同步改为显式 `setCellRenderer`，避免同类陷阱
 
+### ✅ v1.6.0：收藏目录可展开浏览（已完成）
+
+- 修复收藏目录在收藏列表中无法展开的根因：`DefaultTreeModel` 默认 `asksAllowsChildren=false` 把无子节点的节点一律判为叶子（不出展开把手），文件夹收藏与深层虚拟目录的 `treeWillExpand` 懒加载自 1.3.0 起从未真正触发；改为显式 `asksAllowsChildren=true`，`isLeaf` 以节点 `allowsChildren` 为准
+- 任意入口（右键"收藏文件夹/收藏文件"、原生快捷键、导入收编）产生的文件夹收藏（FOLDER）在收藏树中均为可展开节点：首次展开懒加载真实子文件/子文件夹（所有真实子项都显示，含未收藏项），深层目录逐级懒加载；已收藏后代以助记符前缀/灰色路径标识；目录不存在/不可读维持缺失态（红叉叶子）
+- 叶子语义收口：纯文件收藏/行收藏/未收藏真实文件/规则条目显式 `allowsChildren=false` 不显示空展开把手，空分组与无结果规则保持叶子
+- VFS 未收录路径（全局收藏/导入/IDE 重启后）解析兜底：`findFileByPath` 未命中时每路径一次同步刷新，目录真实存在即可正常展开，避免误显示红叉
+
 ## 项目结构
 
 ```
