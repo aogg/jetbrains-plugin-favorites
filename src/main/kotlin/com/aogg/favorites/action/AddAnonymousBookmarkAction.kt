@@ -33,7 +33,7 @@ import java.util.*
  * 直接按指定作用域执行；1.5.x 起目标分组取「该作用域上次使用的分组」，
  * 无记忆/记忆已删除则回退默认「收藏」；右键菜单等原入口行为不变。
  */
-class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名收藏", null), ScopedAddAction {
+class AddAnonymousBookmarkAction : AnAction("添加收藏", "添加收藏", null), ScopedAddAction {
 
     override fun actionPerformed(e: AnActionEvent) {
         handleAction(e, fixedScope = null)
@@ -230,8 +230,8 @@ class AddAnonymousBookmarkAction : AnAction("添加匿名收藏", "添加匿名�
         val message = when {
             successCount > 0 && removeCount > 0 -> "已添加 $successCount 个收藏到「$scopeText」，移除 $removeCount 个收藏"
             successCount > 0 && candidates.size == 1 && lineMode ->
-                "已添加匿名收藏（行 ${candidates.first().lineNumber + 1}）到「$scopeText」"
-            successCount > 0 -> "已添加 $successCount 个匿名收藏到「$scopeText」"
+                "已添加收藏（行 ${candidates.first().lineNumber + 1}）到「$scopeText」"
+            successCount > 0 -> "已添加 $successCount 个收藏到「$scopeText」"
             else -> removalMessage(lineMode)
         }.let { base ->
             if (skipped > 0) "$base\n（跳过 $skipped 个项目外位置：项目收藏仅支持项目内路径）" else base

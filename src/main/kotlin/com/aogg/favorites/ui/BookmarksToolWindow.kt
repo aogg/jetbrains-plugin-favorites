@@ -582,7 +582,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     // ==================== 工具栏额外按钮 ====================
 
     private inner class AddMnemonicFromToolWindowAction :
-        AnAction("添加助记符收藏", "在当前位置添加/移除助记符收藏", AllIcons.Gutter.Bookmark) {
+        AnAction("添加助记收藏", "在当前位置添加/移除助记收藏", AllIcons.Gutter.Bookmark) {
         override fun actionPerformed(e: AnActionEvent) {
             invokeGlobalAction("Favorites.AddMnemonicBookmark")
         }

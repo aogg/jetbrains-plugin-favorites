@@ -32,7 +32,7 @@ import java.util.*
  * 直接按指定作用域打开助记符对话框；1.5.x 起目标分组取「该作用域上次使用的分组」，
  * 无记忆/记忆已删除则回退默认「收藏」；右键菜单等原入口行为不变。
  */
-class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助记符收藏", null), ScopedAddAction {
+class AddMnemonicBookmarkAction : AnAction("添加助记收藏", "添加助记收藏", null), ScopedAddAction {
 
     override fun actionPerformed(e: AnActionEvent) {
         handleAction(e, fixedScope = null)
@@ -113,7 +113,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
         if (virtualFiles.size > 1) {
             Messages.showInfoMessage(
                 project,
-                "助记符收藏每个标识符只能使用一次，已为第一个选中的项目添加收藏。如需为多个项目添加收藏，请分别操作。",
+                "助记收藏每个标识符只能使用一次，已为第一个选中的项目添加收藏。如需为多个项目添加收藏，请分别操作。",
                 "批量选择提示"
             )
         }
@@ -246,7 +246,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记符收藏", "添加助�
             Messages.showInfoMessage(
                 project,
                 // 通知文案带目标分组路径（如「项目收藏/父组/子组」），与分组选择语义对应
-                "已添加助记符收藏 $mnemonicText$descText 到「${scope.label}/$targetGroup」（$typeText）",
+                "已添加助记收藏 $mnemonicText$descText 到「${scope.label}/$targetGroup」（$typeText）",
                 "添加收藏成功"
             )
             BookmarkRefreshHelper.refreshAfterChange(project)

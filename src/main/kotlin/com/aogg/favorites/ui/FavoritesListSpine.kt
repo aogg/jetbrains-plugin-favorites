@@ -132,14 +132,17 @@ internal class SpineFileEntry(override val name: String, val path: String) : Spi
 
 /**
  * 单个列表的文件系统骨架（1.3.0 PhpStorm 风格树）：
- * - 由列表内可见收藏的 filePath 计算公共祖先目录，自上而下生成虚拟目录链；
- * - 仅承载通向收藏项的路径（未收藏的真实内容在文件夹收藏展开时才懒加载，由树侧处理）；
+ * - 文件/行收藏由其父目录计算公共祖先目录，自上而下生成虚拟目录链（仅承载通向收藏项的路径）；
+ * - 文件夹收藏（1.6.1 起）不参与公共祖先链：目录节点锚定分组骨架顶层，从它自己开始显示、
+ *   不生成上级目录链；与文件/行收藏链路中的目录节点同路径（或为公共祖先以下的前缀链）时
+ *   复用既有节点做收藏标记；未收藏的真实内容在文件夹收藏展开时才懒加载（树侧处理）；
  * - 同一文件上的 FILE 与 LINE 收藏合并进同一个 [SpineFileEntry]；
- * - 子项索引键为目录路径（"" 表示作用域基准目录：项目根 / 文件系统根）
+ * - 子项索引键为目录路径（"" 表示作用域基准目录：项目根 / 文件系统根；
+ *   公共祖先非空时，基准目录键下仅存在顶层锚定的文件夹收藏条目）
  *
  * @property scope 所属作用域
  * @property listName 所属列表名（树侧骨架查找键组成部分）
- * @property commonAncestorPath 公共祖先目录路径（""=作用域基准目录；树顶层目录节点由此生成）
+ * @property commonAncestorPath 文件/行收藏的公共祖先目录路径（""=作用域基准目录；树顶层目录节点由此生成）
  * @param absolute 路径是否绝对路径语义（全局作用域=true）
  */
 internal class FavoritesListSpine private constructor(
@@ -154,6 +157,13 @@ internal class FavoritesListSpine private constructor(
         /**
          * 由可见收藏（已按列表排序方式排好）构建列表骨架
          *
+         * 1.6.1 起：文件夹收藏不再参与全局公共祖先链——目录节点锚定在分组骨架顶层
+         * （从它自己开始显示，不生成上级目录链；展开仍为已有的真实子项懒加载）；
+         * 文件/行收藏保持 1.3.0 行为：挂靠父目录、按公共祖先自上而下生成虚拟目录链。
+         * 边界：文件夹收藏路径与文件/行收藏链路中的目录节点同路径（含公共祖先顶层节点、
+         * 公共祖先以下的前缀链）时复用该节点做收藏标记，不重复出两个同名目录节点；
+         * 同一分组只有文件夹收藏时，顶层就是这些文件夹本身。
+         *
          * @param scope 收藏所属作用域
          * @param listName 列表名
          * @param visibleBookmarks 过滤后的可见收藏（顺序=列表排序方式结果，骨架保持该顺序）
@@ -165,31 +175,33 @@ internal class FavoritesListSpine private constructor(
             val bookmarks = visibleBookmarks.filter { it.filePath.isNotBlank() }
             // ////////////////  校验参数  end  ///////////////////////////////////////////
 
-            // ////////////////  准备数据：收藏路径段与挂靠目录段  start  /////////////////
+            // ////////////////  准备数据：拆分 文件/行收藏 与 文件夹收藏  start  ////////////
             val absolute = scope == FavoriteScope.GLOBAL
-            val pathSegs = bookmarks.map { FavoritesTreePaths.segments(it.filePath) }
-            // 文件/行收藏挂靠其父目录；文件夹收藏挂靠自身路径（该路径即目录节点）
-            val dirSegs = pathSegs.mapIndexed { index, segments ->
-                if (bookmarks[index].isFolderBookmark()) segments else segments.dropLast(1)
-            }
+            // 文件/行收藏：保持公共祖先链（挂靠父目录）
+            val fileLikeBookmarks = bookmarks.filterNot { it.isFolderBookmark() }
+            val fileDirSegs = fileLikeBookmarks.map { FavoritesTreePaths.segments(it.filePath).dropLast(1) }
             // ////////////////  准备数据  end  ///////////////////////////////////////////
 
-            // ////////////////  核心逻辑：公共祖先 + 逐收藏建立目录链并挂载条目  start  //
-            val common = FavoritesTreePaths.commonPrefix(dirSegs)
+            // ////////////////  核心逻辑一：文件/行收藏 公共祖先 + 逐收藏建立目录链挂载  start
+            val common = FavoritesTreePaths.commonPrefix(fileDirSegs)
             val spine = FavoritesListSpine(scope, listName, FavoritesTreePaths.join(common, absolute), absolute)
-            bookmarks.forEachIndexed { index, bookmark ->
-                val segments = pathSegs[index]
-                val targetDir = spine.ensureDirChain(common, dirSegs[index])
-                when {
-                    bookmark.isFolderBookmark() ->
-                        spine.markDirBookmark(targetDir, bookmark)
-                    bookmark.isFileBookmark() ->
-                        spine.attachFile(targetDir, segments.last(), bookmark.filePath, bookmark, null)
-                    else ->
-                        spine.attachFile(targetDir, segments.last(), bookmark.filePath, null, bookmark)
+            fileLikeBookmarks.forEachIndexed { index, bookmark ->
+                val segments = FavoritesTreePaths.segments(bookmark.filePath)
+                val targetDir = spine.ensureDirChain(common, fileDirSegs[index])
+                if (bookmark.isFileBookmark()) {
+                    spine.attachFile(targetDir, segments.last(), bookmark.filePath, bookmark, null)
+                } else {
+                    spine.attachFile(targetDir, segments.last(), bookmark.filePath, null, bookmark)
                 }
             }
-            // ////////////////  核心逻辑  end  ///////////////////////////////////////////
+            // ////////////////  核心逻辑一  end  /////////////////////////////////////////
+
+            // ////////////////  核心逻辑二：文件夹收藏 锚定骨架顶层（不参与公共祖先链）  start
+            bookmarks.filter { it.isFolderBookmark() }.forEach { bookmark ->
+                val segments = FavoritesTreePaths.segments(bookmark.filePath)
+                spine.anchorFolderBookmark(common, segments, bookmark)
+            }
+            // ////////////////  核心逻辑二  end  /////////////////////////////////////////
 
             // ////////////////  返回  start  /////////////////////////////////////////////
             return spine
@@ -205,6 +217,69 @@ internal class FavoritesListSpine private constructor(
 
     /** 目录路径 → 骨架目录条目（用于回填收藏标记） */
     private val dirEntryByPath = HashMap<String, SpineDirEntry>()
+
+    /**
+     * 锚定一个文件夹收藏（1.6.1 起，不参与公共祖先链）：
+     * 1) 与文件/行收藏链路中的目录节点同路径（含公共祖先顶层节点与已锚定的同名目录）→ 复用该节点做收藏标记；
+     * 2) 路径位于公共祖先以下（公共祖先为其前缀且更深）→ 沿既有链路 ensureDirChain 建到自身为止；
+     * 3) 其余情况 → 以自身为单个目录条目挂到骨架顶层（基准目录键），不生成上级目录链；
+     * 4) 基准目录自身（路径换算为空串）→ 记为基准目录收藏（树侧物化为项目根/文件系统根节点）
+     *
+     * @param common 文件/行收藏的公共祖先路径段（可为空列表=基准目录）
+     * @param folderSegs 文件夹收藏自身路径段
+     * @param bookmark 文件夹收藏
+     */
+    private fun anchorFolderBookmark(common: List<String>, folderSegs: List<String>, bookmark: Bookmark) {
+        // ////////////////  准备数据：文件夹收藏自身的规范化路径键  start  //////////////////
+        val folderPath = FavoritesTreePaths.join(folderSegs, absolute)
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：按 复用/链内延伸/顶层锚定/基准目录 四分支挂载  start  /
+        when {
+            // 基准目录自身（如收藏了项目根/文件系统根）：树侧按基准目录收藏节点呈现
+            folderPath.isEmpty() -> markDirBookmark("", bookmark)
+            // 与链路中既有目录节点同路径：复用节点做收藏标记（不重复出同名目录节点）
+            folderPath == commonAncestorPath || dirEntryByPath.containsKey(folderPath) ->
+                markDirBookmark(folderPath, bookmark)
+            // 公共祖先为自身路径前缀且更深：沿既有链路建到自身（复用公共祖先顶层节点）
+            common.isNotEmpty() && folderSegs.take(common.size) == common && folderSegs.size > common.size ->
+                markDirBookmark(ensureDirChain(common, folderSegs), bookmark)
+            // 其余：自身为单个顶层目录条目（显示名=目录名，完整路径保留供展开/跳转），不生成上级链
+            else -> attachTopLevelFolder(folderSegs, bookmark)
+        }
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    /**
+     * 将文件夹收藏作为单个目录条目锚定到骨架顶层（基准目录键下）：
+     * 目录显示名取路径最后一段，条目保留完整路径（展开懒加载真实子项、跳转均按完整路径解析）；
+     * 同路径重复收藏复用同一条目（后写收藏标记覆盖）
+     *
+     * @param folderSegs 文件夹收藏自身路径段（非空）
+     * @param bookmark 文件夹收藏
+     */
+    private fun attachTopLevelFolder(folderSegs: List<String>, bookmark: Bookmark) {
+        // ////////////////  准备数据：顶层目录条目名与完整路径键  start  //////////////////
+        val name = folderSegs.last()
+        val folderPath = FavoritesTreePaths.join(folderSegs, absolute)
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：同名且同路径条目复用，否则新建顶层目录条目  start  ///
+        val siblings = childrenByDir.getOrPut("") { mutableListOf() }
+        val existing = siblings.filterIsInstance<SpineDirEntry>()
+            .firstOrNull { it.name == name && it.path == folderPath }
+        if (existing == null) {
+            SpineDirEntry(name, folderPath).also {
+                siblings.add(it)
+                dirEntryByPath[it.path] = it
+            }
+        }
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  逻辑后：回填收藏标记（条目与路径索引）  start  ////////////////
+        markDirBookmark(folderPath, bookmark)
+        // ////////////////  逻辑后  end  ///////////////////////////////////////////////
+    }
 
     /**
      * 确保从公共祖先到目标目录的虚拟目录链存在，返回目标目录路径键

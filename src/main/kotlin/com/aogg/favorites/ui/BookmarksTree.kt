@@ -628,6 +628,10 @@ class BookmarksTree(
             val commonTreeNode = DefaultMutableTreeNode(commonDir, !commonDir.missing)
             appendSpineChildren(commonTreeNode, scope, info.name, spine, spine.commonAncestorPath)
             listNode.add(commonTreeNode)
+
+            // 文件夹收藏顶层锚定（1.6.1）：基准目录键下的顶层目录条目（仅文件夹收藏锚定在这里）
+            // 与公共祖先节点平级挂在分组节点下——收藏的文件夹从它自己开始显示，不生成上级目录链
+            appendSpineChildren(listNode, scope, info.name, spine, "")
         }
         // ////////////////  核心逻辑二  end  ////////////////////////////////////////
 

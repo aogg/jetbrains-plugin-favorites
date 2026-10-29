@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.6.0</version>
+    <version>1.6.1</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -18,6 +18,19 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.6.1 - 右键收藏可用性与显示修复
+    - 右键「收藏」子菜单整组按上下文显隐：组挂自定义 class，无编辑器且无选中文件的上下文
+      （如项目视图空白处右键）整组隐藏，不再渲染灰色空二级菜单（幽灵项）；有文件选中/编辑器
+      上下文时组可用，「收藏文件夹/收藏文件」「添加收藏」「添加助记收藏」正常加收藏；
+      组图标换为收藏工具窗口语义图标（AllIcons.Toolwindows.ToolWindowFavorites）
+    - 收藏文件夹显示修复：文件夹收藏在收藏列表中从它自己开始显示（顶层锚定，不再生成上级
+      目录链）；与文件/行收藏链路中的目录节点同路径时复用该节点做收藏标记；文件/行收藏保持
+      「上级文件夹树」行为不变；同一分组只有文件夹收藏时顶层就是这些文件夹本身
+    - 菜单文案统一：「添加匿名收藏」→「添加收藏」、「添加助记符收藏」→「添加助记收藏」
+      （右键菜单/工具窗口按钮/结果提示同步，类名与 action id 不变）
+    - 隐藏原生书签界面（默认开启）覆盖右键菜单组：开启后项目视图/编辑器标签页右键的「书签」
+      弹出组与行号区右键的平铺书签组一并隐藏，关闭开关立即恢复（工具窗口与快捷键接管语义不变）
+
     1.6.0 - 收藏目录可展开浏览
     - 修复收藏目录在收藏列表中无法展开的根因：BookmarksTree 的 DefaultTreeModel 一直使用默认
       asksAllowsChildren=false（无子节点一律判为叶子、不出展开把手），文件夹收藏与深层虚拟目录的
@@ -236,8 +249,12 @@
     </extensions>
 
     <actions>
-        <!-- 收藏子菜单：编辑器右键 / 行号区右键 / 项目视图右键 / 编辑器标签页右键 / 导航栏右键，均置底 -->
-        <group id="Favorites.Group" text="收藏" description="Favorites 收藏菜单" icon="AllIcons.Gutter.Bookmark" popup="true">
+        <!-- 收藏子菜单：编辑器右键 / 行号区右键 / 项目视图右键 / 编辑器标签页右键 / 导航栏右键，均置底；
+             class=FavoritesActionGroup 按上下文控制整组显隐（无编辑器且无选中文件时整组隐藏，不留灰色幽灵项）；
+             图标用收藏工具窗口语义图标（2023.3 存在 AllIcons.Toolwindows.ToolWindowFavorites） -->
+        <group id="Favorites.Group" class="com.aogg.favorites.action.FavoritesActionGroup"
+               text="收藏" description="Favorites 收藏菜单"
+               icon="AllIcons.Toolwindows.ToolWindowFavorites" popup="true">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
             <add-to-group group-id="EditorGutterPopupMenu" anchor="last"/>
             <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
@@ -251,11 +268,11 @@
                     text="收藏" description="收藏选中的文件/文件夹：弹出「作用域+分组」选择（默认记住上次选择，多选批量一次）；已收藏的位置则切换移除"/>
 
             <action id="Favorites.AddAnonymousBookmark" class="com.aogg.favorites.action.AddAnonymousBookmarkAction"
-                    text="添加匿名收藏" description="添加/移除匿名收藏">
+                    text="添加收藏" description="添加/移除收藏">
                 <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt F11"/>
             </action>
             <action id="Favorites.AddMnemonicBookmark" class="com.aogg.favorites.action.AddMnemonicBookmarkAction"
-                    text="添加助记符收藏" description="添加/移除助记符收藏">
+                    text="添加助记收藏" description="添加/移除助记收藏">
                 <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt shift F11"/>
             </action>
         </group>

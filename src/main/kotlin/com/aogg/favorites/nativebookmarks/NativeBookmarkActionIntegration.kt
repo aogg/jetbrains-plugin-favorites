@@ -170,6 +170,22 @@ object NativeBookmarkActionIntegration {
     private const val GOTO_BOOKMARK_PREFIX = "GotoBookmark"
 
     /**
+     * 原生「书签」右键菜单组（2023.3 平台 idea/LangActions.xml，均为无 class 的 XML DefaultActionGroup）：
+     * - popup@ExpandableBookmarkContextMenu：项目视图右键与编辑器标签页右键的「书签」弹出组
+     *   （ProjectViewPopupMenu 以 <reference> 引用；EditorTabPopupMenu 以 add-to-group 挂载；
+     *   组内原子项：AddAnotherBookmark / EditBookmark / ToggleBookmark）；
+     * - popup@BookmarkContextMenu：编辑器行号区右键的平铺书签组（挂 EditorGutterPopupMenu；
+     *   组内原子项：AddAnotherBookmark / EditBookmark / ToggleBookmark /
+     *   DeleteMnemonicFromBookmark / ToggleBookmarkWithMnemonic）。
+     * 两组均无自定义类（无 update 强制可见），随 templatePresentation 隐藏可靠，恢复同机制；
+     * 编辑器正文右键（EditorPopupMenu）2023.3 未挂任何书签组，无需处理。
+     */
+    private val NATIVE_BOOKMARK_MENU_GROUP_IDS = listOf(
+        "popup@ExpandableBookmarkContextMenu",
+        "popup@BookmarkContextMenu"
+    )
+
+    /**
      * 需要接管（replaceAction）的原生动作 id → 转发目标与执行方式
      * 语义（接管为无条件，与设置开关无关）：
      * ToggleBookmark→匿名收藏（固定当前项目作用域）；ToggleBookmarkWithMnemonic→助记符收藏（固定当前项目作用域）；
@@ -230,7 +246,8 @@ object NativeBookmarkActionIntegration {
     /**
      * 隐藏原生书签界面动作（"隐藏原生书签界面"开关开启时调用）
      *
-     * 隐藏未接管的残余原生动作（ToggleBookmark0-9/A-Z、ShowTypeBookmarks）与原生 Bookmarks 动作组
+     * 隐藏未接管的残余原生动作（ToggleBookmark0-9/A-Z、ShowTypeBookmarks）、原生 Bookmarks 动作组
+     * 与原生「书签」右键菜单组（项目视图/标签页/行号区，1.6.1 起纳入）
      */
     fun hideNativeActions(actionManager: ActionManager) {
         runCatching {
@@ -239,6 +256,9 @@ object NativeBookmarkActionIntegration {
                 hideAction(actionManager, state, hiddenId)
             }
             hideAction(actionManager, state, NATIVE_BOOKMARKS_GROUP_ID)
+            for (groupId in NATIVE_BOOKMARK_MENU_GROUP_IDS) {
+                hideAction(actionManager, state, groupId)
+            }
         }.onFailure { log.warn("隐藏原生书签界面动作失败（不影响其它功能）", it) }
     }
 
