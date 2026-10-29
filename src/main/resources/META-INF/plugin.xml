@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.6.1</version>
+    <version>1.6.2</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -18,6 +18,10 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.6.2 - 工具栏新建规则图标区分
+    - 收藏工具窗口「新建规则」按钮图标改用 AllIcons.FileTypes.Regexp（正则 .* 图标，2023.3 无
+      AllIcons.Nodes.Regexp，同一资源挂于 FileTypes.Regexp），不再与「添加收藏」的加号
+      （AllIcons.General.Add，ToolbarDecorator 标准 ADD）撞图；文案与行为不变
     1.6.1 - 右键收藏可用性与显示修复
     - 右键「收藏」子菜单整组按上下文显隐：组挂自定义 class，无编辑器且无选中文件的上下文
       （如项目视图空白处右键）整组隐藏，不再渲染灰色空二级菜单（幽灵项）；有文件选中/编辑器

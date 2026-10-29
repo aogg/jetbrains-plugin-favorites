@@ -623,9 +623,11 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
 
     /**
      * 新建规则按钮（1.4.0）：打开规则编辑对话框（新建模式）
+     * 图标（1.6.2）：用正则 .* 图标（AllIcons.FileTypes.Regexp）表达「匹配规则」语义，
+     * 不再与旁边「添加收藏」的标准加号（AllIcons.General.Add，ToolbarDecorator ADD）撞图
      */
     private inner class CreateRuleAction :
-        AnAction("新建规则", "新建一条匹配规则（正则/SQL/SSH，当前支持正则）", AllIcons.General.Add) {
+        AnAction("新建规则", "新建一条匹配规则（正则/SQL/SSH，当前支持正则）", AllIcons.FileTypes.Regexp) {
         override fun actionPerformed(e: AnActionEvent) {
             createNewRule()
         }
