@@ -41,7 +41,7 @@ import javax.swing.event.DocumentListener
  * 提供统一的收藏管理界面（1.3.0 PhpStorm 风格树 + 1.2.0 双作用域 + 1.4.0 规则匹配 + 1.7.0 共享收藏）：
  * - 顶部：SearchTextField 实时过滤（作用域/描述/文件名/路径/列表名/规则名/条目文本）+ 排序方式下拉（按列表记忆持久化，各作用域独立）
  * - 中部：ToolbarDecorator + 树（作用域→[共享收藏按集合]→列表→文件系统风格树：虚拟目录链/文件/行收藏/文件夹懒加载 + 规则匹配根节点）
- * - 工具栏：添加收藏 / 编辑描述 / 删除 / 添加助记符 / 导入原生书签 / 管理共享引用 / 全部展开 / 全部折叠 / 收藏设置 / 新建规则 / 刷新规则
+ * - 工具栏：添加收藏 / 编辑描述 / 删除 / 添加助记符 / 导入原生书签 / 配置共享项目 / 全部展开 / 全部折叠 / 收藏设置 / 新建规则 / 刷新规则
  * - 打开工具窗口时后台自动全量刷新一次规则（不阻塞 UI）
  */
 class BookmarksToolWindowFactory : ToolWindowFactory {
@@ -144,13 +144,13 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
                 deleteRuleWithConfirm(rule)
             }
 
-            // 共享收藏（1.7.0：共享收藏根/集合节点右键）
+            // 共享收藏（1.7.0 共享根/集合节点右键；1.7.1 配置来源项目模型）
             override fun manageSharedRefs() {
                 openSharedRefManager()
             }
 
-            override fun unsubscribeSharedCollection(collectionId: String) {
-                unsubscribeFromSharedCollection(collectionId)
+            override fun removeSharedSourceProject(sourcePath: String) {
+                removeSharedSourceProjectWithRefresh(sourcePath)
             }
 
             override fun unshareOwnSharedCollection(collectionId: String) {
@@ -292,7 +292,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         if (isForeignSharedBookmark(selected)) {
             Messages.showInfoMessage(
                 project,
-                "该收藏来自其它项目的共享（只读引用），只能在其来源项目中修改。",
+                "该收藏来自共享配置的来源项目（只读镜像），只能在其来源项目中修改。",
                 "共享收藏只读"
             )
             return
@@ -324,7 +324,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         if (deletable.isEmpty()) {
             Messages.showInfoMessage(
                 project,
-                "选中的收藏全部来自其它项目的共享（只读引用），无法删除；可到「共享收藏」右键停止引用整个集合。",
+                "选中的收藏全部来自共享配置的来源项目（只读镜像），无法删除；可到「共享收藏」右键移除共享项目或打开「配置共享项目」调整。",
                 "共享收藏只读"
             )
             return
@@ -345,7 +345,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         if (foreignShared.isNotEmpty()) {
             Messages.showInfoMessage(
                 project,
-                "其中 ${foreignShared.size} 个来自其它项目的共享收藏为只读引用，未删除。",
+                "其中 ${foreignShared.size} 个来自共享配置的来源项目为只读镜像，未删除。",
                 "共享收藏只读"
             )
         }
@@ -362,7 +362,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         if (isForeignSharedBookmark(selected)) {
             Messages.showInfoMessage(
                 project,
-                "该收藏来自其它项目的共享（只读引用），只能在其来源项目中设置助记符。",
+                "该收藏来自共享配置的来源项目（只读镜像），只能在其来源项目中设置助记符。",
                 "共享收藏只读"
             )
             return
@@ -388,14 +388,15 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     }
 
     /**
-     * 选中收藏是否属于外来共享集合（订阅的其它项目集合，只读；非共享作用域恒为 false）
+     * 选中收藏是否属于外来共享数据（1.7.1 起按「是否来自配置的来源项目切片」判定，
+     * 旧订阅遗留集合同样覆盖；只读；非共享作用域恒为 false）
      */
     private fun isForeignSharedBookmark(item: com.aogg.favorites.ui.ScopedBookmark): Boolean {
         // ////////////////  校验参数：仅共享作用域需要判断  start  ///////////////////////
         if (item.scope != FavoriteScope.SHARED) return false
         // ////////////////  校验参数  end  ///////////////////////////////////////////
 
-        // ////////////////  返回：归属集合非自己的集合即外来只读  start  ////////////////
+        // ////////////////  返回：命中来源项目切片/旧订阅遗留集合即外来只读  start  ///////
         return com.aogg.favorites.model.SharedBookmarkManager.getInstance(project)
             .isForeignBookmark(item.bookmark.id)
         // ////////////////  返回  end  ///////////////////////////////////////////////
@@ -550,21 +551,31 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         }
     }
 
-    // ==================== 共享收藏操作（1.7.0） ====================
+    // ==================== 共享收藏操作（1.7.0；1.7.1 配置来源项目模型） ====================
 
     /**
-     * 打开「管理共享引用」对话框（OK 应用订阅变更后对话框内部已刷新树）
+     * 打开「配置共享项目」对话框（OK 保存配置后对话框内部已刷新树）
      */
     private fun openSharedRefManager() {
         SharedRefManagerDialog(project).show()
     }
 
     /**
-     * 停止引用共享集合（订阅集合节点右键）：移除本项目订阅并刷新
+     * 移除共享项目（来源项目节点右键）：从本项目配置移除该来源项目并刷新收藏树。
+     * 仅改本项目 favorites.shared.refs.xml 的来源项目配置，绝不触碰来源项目的任何文件
      */
-    private fun unsubscribeFromSharedCollection(collectionId: String) {
-        com.aogg.favorites.model.SharedBookmarkStore.getInstance().unsubscribe(project, collectionId)
+    private fun removeSharedSourceProjectWithRefresh(sourcePath: String) {
+        // ////////////////  核心逻辑：按规范化路径剔除该来源项目并保存  start  ////////////
+        val store = com.aogg.favorites.model.SharedBookmarkStore.getInstance()
+        val target = com.aogg.favorites.model.SharedBookmarkStore.normalizeProjectPath(sourcePath)
+        val remaining = store.configuredSourceProjects(project)
+            .filter { com.aogg.favorites.model.SharedBookmarkStore.normalizeProjectPath(it) != target }
+        store.setConfiguredSourceProjects(project, remaining)
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  逻辑后：刷新收藏树与 gutter  start  ///////////////////////////
         afterDataChanged()
+        // ////////////////  逻辑后  end  ///////////////////////////////////////////////
     }
 
     /**
@@ -693,10 +704,11 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     }
 
     /**
-     * 管理共享引用按钮（1.7.0）：打开管理共享引用对话框（勾选本项目要引用的共享集合）
+     * 配置共享项目按钮（1.7.0 为「管理共享引用」，1.7.1 改名）：
+     * 打开配置共享项目对话框（勾选要展示其项目收藏的来源项目，可全部已知项目中选择）
      */
     private inner class ManageSharedRefsAction :
-        AnAction("管理共享引用", "管理共享收藏：查看全部共享集合并勾选本项目要引用的集合", AllIcons.Actions.Share) {
+        AnAction("配置共享项目", "配置共享收藏的来源项目：在全部已知项目中选择并只读展示其项目收藏", AllIcons.Actions.Share) {
         override fun actionPerformed(e: AnActionEvent) {
             openSharedRefManager()
         }

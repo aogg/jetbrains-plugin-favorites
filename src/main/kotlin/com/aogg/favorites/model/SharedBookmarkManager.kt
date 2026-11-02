@@ -5,16 +5,22 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 
 /**
- * 共享收藏管理器（项目级门面，1.7.0 新增）
+ * 共享收藏管理器（项目级门面，1.7.0 新增，1.7.1 改版为配置来源项目模型）
  *
  * 「共享收藏」作用域对 UI/动作层的统一入口，实现 [ScopedBookmarkManager]：
- * - 读操作聚合「自己 + 已订阅」集合（[SharedBookmarkStore.visibleCollections]）；同名列表自己集合优先；
- * - 写操作全部落到自己集合（[SharedBookmarkStore.collectionOf]），外来集合只读——
- *   目标实为外来集合的数据时一律返回 false/0/null；
+ * - 读操作聚合「自己 + 旧订阅遗留 + 配置的来源项目」；同名列表自己集合优先；
+ * - 单点查找（getBookmark/getBookmarkByMnemonic）覆盖来源项目切片：
+ *   支持从来源项目节点把收藏复制转移到其它作用域（外来只读=复制），助记符跨来源跳转可用；
+ * - 聚合读（getAllBookmarks/getLineBookmarks/getLists/childrenOf/…）只含
+ *   「自己 + 旧订阅遗留」，不含来源项目切片——来源收藏是来源项目「项目收藏」的只读镜像，
+ *   不参与本项目树的徽标统计、gutter 行匹配与「已存在收藏」切换判定；
+ * - 写操作全部落到自己集合（[SharedBookmarkStore.collectionOf]），外来集合/来源切片只读——
+ *   目标实为外来数据时一律返回 false/0/null；
  * - hasList/isMnemonicAvailable 只按自己集合（写只发生在自己集合，输入校验语义）；
- * - getSortType 自己集合优先，否则订阅集合读值，否则默认 [SortType.ADDED]。
+ * - getSortType 自己集合优先，否则旧订阅遗留集合读值，否则默认 [SortType.ADDED]。
  *
- * 路径语义：filePath 存绝对路径（同 GLOBAL），跨项目定位同一位置。
+ * 路径语义：自己的集合/旧订阅遗留 filePath 存绝对路径（同 GLOBAL）；来源切片内 filePath
+ * 由 [SourceProjectStore] 统一换算为来源项目根下的绝对路径。
  */
 @Service(Service.Level.PROJECT)
 class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManager {
@@ -60,9 +66,25 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     private fun ownCollection(): SharedBookmarkStore.SharedCollection = store().collectionOf(project)
 
     /**
-     * 已订阅的外来集合（按订阅顺序，不含自己的集合）
+     * 已配置的来源项目只读切片（1.7.1 新增，按配置顺序，不含自己的集合）：
+     * 数据由 [SourceProjectStore] 实时读打开项目/解析磁盘文件得到
      */
-    private fun subscribedCollections(): List<SharedBookmarkStore.SharedCollection> {
+    private fun sourceCollections(): List<SharedBookmarkStore.SharedCollection> {
+        // ////////////////  准备数据：来源项目配置  start  ///////////////////////////////
+        val paths = store().configuredSourceProjects(project)
+        if (paths.isEmpty()) return emptyList()
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：逐来源项目只读切片  start  /////////////////////////////
+        return SourceProjectStore.getInstance().collectionsFor(paths)
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    /**
+     * 旧订阅遗留的外来集合（1.7.0 订阅模型，迁移后恒为空列表）：
+     * 聚合读（列表/排序/按列表取收藏等）沿用其可见性，迁移完成后自然只剩自己集合
+     */
+    private fun legacyForeignCollections(): List<SharedBookmarkStore.SharedCollection> {
         val own = ownCollection()
         return store().visibleCollections(project).filter { it.id != own.id }
     }
@@ -73,22 +95,26 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     fun ownCollectionManager(): ScopedBookmarkManager = SharedCollectionManagerView(ownCollection())
 
     /**
-     * 收藏是否属于外来集合（存在于可见共享集合但不在自己集合中；转移语义用）
+     * 收藏是否属于外来只读数据（1.7.1 起判定范围=配置的来源项目切片；
+     * 旧订阅遗留的外来集合同样覆盖；转移语义用）
      *
      * @param bookmarkId 收藏 id
-     * @return true=外来集合（只读，跨作用域转移为复制）
+     * @return true=外来数据（只读，跨作用域转移为复制）
      */
     fun isForeignBookmark(bookmarkId: String): Boolean {
-        // ////////////////  准备数据：收藏归属的集合  start  /////////////////////////////
-        val owner = store().collectionOfBookmark(project, bookmarkId) ?: return false
+        // ////////////////  准备数据：收藏归属的集合（自己+旧订阅遗留）  start  ////////////
+        val own = ownCollection()
+        store().collectionOfBookmark(project, bookmarkId)?.let { owner ->
+            return owner.id != own.id
+        }
         // ////////////////  准备数据  end  /////////////////////////////////////////////
 
-        // ////////////////  返回：非自己集合即外来  start  ///////////////////////////////
-        return owner.id != ownCollection().id
+        // ////////////////  返回：命中配置的来源项目切片即外来只读  start  ////////////////
+        return sourceCollections().any { it.core.getBookmark(bookmarkId) != null }
         // ////////////////  返回  end  /////////////////////////////////////////////////
     }
 
-    // ==================== 收藏基础操作（读=自己+订阅聚合；写=只落自己集合） ====================
+    // ==================== 收藏基础操作（读=自己+旧订阅遗留聚合；写=只落自己集合） ====================
 
     /**
      * 添加收藏到自己集合（filePath 须为绝对路径）
@@ -116,15 +142,20 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     }
 
     /**
-     * 获取收藏（自己集合优先，未命中查订阅集合）
+     * 获取收藏（自己集合优先，未命中查旧订阅遗留，再查来源项目切片；
+     * 覆盖来源切片是为「移动到列表」从来源节点复制转出提供数据）
      *
      * @param bookmarkId 收藏ID
      * @return 收藏项，不存在返回 null
      */
     override fun getBookmark(bookmarkId: String): Bookmark? {
-        // ////////////////  核心逻辑：自己集合优先，订阅集合随后  start  ////////////////
+        // ////////////////  核心逻辑：自己集合优先，订阅集合/来源切片随后  start  ////////////
         ownCollection().core.getBookmark(bookmarkId)?.let { return it }
-        for (collection in subscribedCollections()) {
+        for (collection in store().visibleCollections(project)) {
+            if (collection.id == ownCollection().id) continue
+            collection.core.getBookmark(bookmarkId)?.let { return it }
+        }
+        for (collection in sourceCollections()) {
             collection.core.getBookmark(bookmarkId)?.let { return it }
         }
         return null
@@ -132,15 +163,20 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     }
 
     /**
-     * 通过助记符获取收藏（自己集合优先，未命中查订阅集合）
+     * 通过助记符获取收藏（自己集合优先，未命中查旧订阅遗留，再查来源项目切片：
+     * 助记符跳转链（Ctrl+Alt+A-Z）在配置来源项目后仍可跳转来源收藏）
      *
      * @param mnemonic 助记符
      * @return 收藏项，不存在返回 null
      */
     override fun getBookmarkByMnemonic(mnemonic: Char): Bookmark? {
-        // ////////////////  核心逻辑：自己集合优先，订阅集合随后  start  ////////////////
+        // ////////////////  核心逻辑：自己集合优先，订阅集合/来源切片随后  start  ////////////
         ownCollection().core.getBookmarkByMnemonic(mnemonic)?.let { return it }
-        for (collection in subscribedCollections()) {
+        for (collection in store().visibleCollections(project)) {
+            if (collection.id == ownCollection().id) continue
+            collection.core.getBookmarkByMnemonic(mnemonic)?.let { return it }
+        }
+        for (collection in sourceCollections()) {
             collection.core.getBookmarkByMnemonic(mnemonic)?.let { return it }
         }
         return null
@@ -148,7 +184,7 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     }
 
     /**
-     * 获取可见范围（自己+订阅）全部收藏（自己集合在前）
+     * 获取可见范围（自己+旧订阅遗留）全部收藏（自己集合在前）
      */
     override fun getAllBookmarks(): List<Bookmark> {
         // ////////////////  核心逻辑：逐集合聚合  start  ///////////////////////////////
@@ -247,10 +283,10 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
         // ////////////////  核心逻辑  end  /////////////////////////////////////////////
     }
 
-    // ==================== 分组（List）管理（读=自己+订阅同名去重；写=只落自己集合） ====================
+    // ==================== 分组（List）管理（读=自己+旧订阅遗留同名去重；写=只落自己集合） ====================
 
     /**
-     * 获取可见范围的分组元信息（自己集合在前；订阅集合中与自己同名的分组被自己遮蔽，不重复出现）
+     * 获取可见范围的分组元信息（自己集合在前；旧订阅遗留集合与自己同名的分组被自己遮蔽，不重复出现）
      */
     override fun getLists(): List<ListInfo> {
         // ////////////////  准备数据：自己集合分组（含默认列表，排在首位）  start  ////////
@@ -259,8 +295,8 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
         val ownNames = merged.map { it.name }.toHashSet()
         // ////////////////  准备数据  end  /////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：订阅集合分组（同名被自己遮蔽）  start  //////////////
-        for (collection in subscribedCollections()) {
+        // ////////////////  核心逻辑：旧订阅遗留集合分组（同名被自己遮蔽）  start  //////////////
+        for (collection in legacyForeignCollections()) {
             for (info in collection.core.getLists()) {
                 if (info.name !in ownNames) {
                     merged.add(info)
@@ -288,7 +324,7 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
         ownCollection().core.createSubGroup(parentName, newName)
 
     /**
-     * 获取指定父分组的直接子分组（自己集合在前；订阅集合与自己同名的子分组被遮蔽）
+     * 获取指定父分组的直接子分组（自己集合在前；旧订阅遗留集合与自己同名的子分组被遮蔽）
      *
      * @param parentId 父分组 id（""=顶级）
      */
@@ -300,8 +336,8 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
         val ownNames = own.core.getLists().map { it.name }.toHashSet()
         // ////////////////  准备数据  end  /////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：订阅集合子分组（同名被自己遮蔽）  start  //////////////
-        for (collection in subscribedCollections()) {
+        // ////////////////  核心逻辑：旧订阅遗留集合子分组（同名被自己遮蔽）  start  //////////////
+        for (collection in legacyForeignCollections()) {
             for (info in collection.core.childrenOf(parentId)) {
                 if (info.name !in ownNames) {
                     merged.add(info)
@@ -313,13 +349,13 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     }
 
     /**
-     * 获取分组的完整层级路径（自己集合优先，未命中查订阅集合，分组不存在时原样返回名称）
+     * 获取分组的完整层级路径（自己集合优先，未命中查旧订阅遗留集合，分组不存在时原样返回名称）
      */
     override fun fullPath(name: String): String {
         // ////////////////  核心逻辑：自己集合优先，订阅集合随后  start  ////////////////
         val own = ownCollection()
         if (own.core.hasList(name)) return own.core.fullPath(name)
-        for (collection in subscribedCollections()) {
+        for (collection in legacyForeignCollections()) {
             if (collection.core.hasList(name)) return collection.core.fullPath(name)
         }
         return name
@@ -360,13 +396,13 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
         ownCollection().core.setSortType(listName, sortType)
 
     /**
-     * 获取分组排序方式（自己集合优先，否则订阅集合读值，否则默认 [SortType.ADDED]）
+     * 获取分组排序方式（自己集合优先，否则旧订阅遗留集合读值，否则默认 [SortType.ADDED]）
      */
     override fun getSortType(listName: String): SortType {
         // ////////////////  核心逻辑：自己集合优先，订阅集合随后，兜底 ADDED  start  ////////
         val own = ownCollection()
         if (own.core.hasList(listName)) return own.core.getSortType(listName)
-        for (collection in subscribedCollections()) {
+        for (collection in legacyForeignCollections()) {
             if (collection.core.hasList(listName)) return collection.core.getSortType(listName)
         }
         return SortType.ADDED
@@ -374,13 +410,13 @@ class SharedBookmarkManager(private val project: Project) : ScopedBookmarkManage
     }
 
     /**
-     * 获取指定分组下的收藏（同名分组自己集合优先：先在自己集合找，未命中查订阅集合）
+     * 获取指定分组下的收藏（同名分组自己集合优先：先在自己集合找，未命中查旧订阅遗留集合）
      */
     override fun getBookmarksByList(listName: String): List<Bookmark> {
         // ////////////////  核心逻辑：同名分组自己集合优先  start  //////////////////////
         val own = ownCollection()
         if (own.core.hasList(listName)) return own.core.getBookmarksByList(listName)
-        for (collection in subscribedCollections()) {
+        for (collection in legacyForeignCollections()) {
             if (collection.core.hasList(listName)) return collection.core.getBookmarksByList(listName)
         }
         return emptyList()

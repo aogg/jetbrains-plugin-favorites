@@ -56,7 +56,8 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                 icon = BookmarkIconHelper.getScopeIcon(node.scope)
                 append(node.toString())
             }
-            // 共享收藏集合节点（1.7.0）：自己的集合=项目图标；订阅集合=锁定图标+灰色（只读），tooltip 带来源项目路径
+            // 共享收藏集合节点（1.7.0；1.7.1 扩展来源项目切片节点）：
+            // 自己的集合=项目图标；来源项目切片/旧订阅遗留集合=锁定图标+灰色（只读），tooltip 带来源项目路径
             is SharedCollectionNode -> {
                 icon = if (node.mine) {
                     AllIcons.Nodes.Project
@@ -66,7 +67,13 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                 append(node.toString())
                 if (!node.mine) {
                     append("（只读）", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-                    toolTipText = "来源项目：${node.ownerProjectPath}"
+                    toolTipText = buildString {
+                        append("来源项目：${node.ownerProjectPath}")
+                        // 来源项目切片空数据：提示可能是项目收藏为空或 .idea/favorites.xml 不可读
+                        if (node.sourceProject && node.totalCount == 0) {
+                            append("（项目收藏为空或 .idea/favorites.xml 不可读）")
+                        }
+                    }
                 }
             }
             // 共享收藏空态提示节点（1.7.0）

@@ -11,6 +11,7 @@ import com.aogg.favorites.model.ScopedBookmarkManager
 import com.aogg.favorites.model.SharedBookmarkManager
 import com.aogg.favorites.model.SharedBookmarkStore
 import com.aogg.favorites.model.SharedCollectionManagerView
+import com.aogg.favorites.model.SourceProjectStore
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
 import com.intellij.openapi.actionSystem.ActionManager
@@ -261,22 +262,25 @@ data class RuleNode(
 }
 
 /**
- * 共享收藏集合节点用户对象（共享收藏根节点的子节点，1.7.0 新增）：
+ * 共享收藏集合节点用户对象（共享收藏根节点的子节点，1.7.0 新增，1.7.1 扩展来源项目节点）：
  * 集合节点之下才是其 分组 → 文件系统风格树。
  * toString 同时作为 TreeSpeedSearch 的匹配文本
  *
- * @param collectionId 集合 id（来源项目路径哈希）
+ * @param collectionId 集合 id（自己的集合=来源项目路径哈希；来源项目切片="source-" 前缀+哈希）
  * @param ownerProjectName 来源项目显示名（自己的集合显示为「我的共享（项目名）」）
- * @param ownerProjectPath 来源项目根路径（订阅集合 tooltip 展示用）
- * @param mine 是否自己的集合（true=自己的，可写；false=订阅的外来集合，只读）
+ * @param ownerProjectPath 来源项目根路径（只读节点 tooltip 展示用）
+ * @param mine 是否自己的集合（true=自己的，可写；false=只读：旧订阅遗留集合或来源项目切片）
  * @param totalCount 该集合收藏总数（徽标展示）
+ * @param sourceProject 是否配置的来源项目切片节点（1.7.1 新增：右键=移除共享项目；
+ *        false=自己的集合或旧订阅遗留集合）
  */
 data class SharedCollectionNode(
     val collectionId: String,
     val ownerProjectName: String,
     val ownerProjectPath: String,
     val mine: Boolean,
-    val totalCount: Int
+    val totalCount: Int,
+    val sourceProject: Boolean = false
 ) {
     override fun toString(): String = buildString {
         if (mine) {
@@ -289,11 +293,11 @@ data class SharedCollectionNode(
 }
 
 /**
- * 共享收藏空态提示节点用户对象（1.7.0 新增）：
- * 共享收藏根下无自己数据且无订阅时显示的提示叶子节点
+ * 共享收藏空态提示节点用户对象（1.7.0 新增，1.7.1 文案改为配置共享项目）：
+ * 共享收藏根下无自己数据且未配置来源项目时显示的提示叶子节点
  */
 class SharedEmptyHintNode {
-    override fun toString(): String = "尚未共享与引用（右键管理共享引用）"
+    override fun toString(): String = "尚未配置共享项目（右键配置共享项目）"
 }
 
 /**
@@ -358,10 +362,11 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  * - 右键菜单：规则根=新建规则/全部刷新；规则=刷新此规则/编辑规则/启用禁用/删除规则；条目=跳转（仅可跳转的）
  * - 搜索过滤：规则名与条目文本参与匹配（规则名命中放行全部条目，否则仅保留命中条目）
  *
- * 共享收藏（1.7.0）：第一层第二根节点「共享收藏」，根下按集合分组：
- * - 集合节点=自己的集合「我的共享（项目名）」（可写）与订阅集合「共享自：来源项目」（只读），
- *   集合节点之下才是其 分组 → 文件树；空态（无自己数据且无订阅）显示提示叶子节点
- * - 右键：共享根/集合节点=管理共享引用…；订阅集合=停止引用；自己集合=取消共享…（确认后删共享数据）
+ * 共享收藏（1.7.0 引入，1.7.1 改版为配置来源项目模型）：第一层第二根节点「共享收藏」，根下按集合分组：
+ * - 集合节点=自己的集合「我的共享（项目名）」（可写）与每个已配置来源项目的
+ *   「共享自：来源项目」（只读展示该项目收藏），集合节点之下才是其 分组 → 文件树；
+ *   空态（无自己数据且未配置来源项目）显示提示叶子节点
+ * - 右键：共享根/集合节点=配置共享项目…；来源项目节点=移除共享项目；自己集合=取消共享…（确认后删共享数据）
  * - 外来集合上下文只读：分组 CRUD 隐藏、删除/编辑/助记符给只读提示；移动到列表目标分组只取自己集合
  *
  * 交互：
@@ -401,9 +406,15 @@ class BookmarksTree(
         fun toggleRuleEnabled(rule: MatchRule)
         fun deleteRule(rule: MatchRule)
 
-        // 共享收藏（1.7.0：共享收藏根/集合节点右键）
+        // 共享收藏（1.7.0 共享根/集合节点右键；1.7.1 配置来源项目模型）
         fun manageSharedRefs()
-        fun unsubscribeSharedCollection(collectionId: String)
+
+        /**
+         * 移除共享项目（来源项目节点右键）：从本项目配置中移除该来源项目并刷新
+         *
+         * @param sourcePath 来源项目根路径
+         */
+        fun removeSharedSourceProject(sourcePath: String)
         fun unshareOwnSharedCollection(collectionId: String)
     }
 
@@ -597,9 +608,10 @@ class BookmarksTree(
     }
 
     /**
-     * 构建「共享收藏」根下的集合分组子树（1.7.0 新增）：
-     * 根下按集合分组（自己的集合「我的共享（项目名）」在前，订阅集合「共享自：来源项目」按订阅顺序随后），
-     * 集合节点之下才是其 分组 → 文件树；空态（无自己数据且无订阅）显示提示叶子节点。
+     * 构建「共享收藏」根下的子树（1.7.0 按集合分组，1.7.1 改版为配置来源项目模型）：
+     * 根下依次为自己的集合「我的共享（项目名）」（可写，无数据时跳过）与
+     * 每个已配置来源项目的「共享自：来源项目」节点（只读展示其项目收藏，空数据也显示并可提示）；
+     * 空态（无自己数据且未配置来源项目）显示提示叶子节点。
      *
      * 搜索过滤：集合显示名/来源项目名/来源路径命中时放行该集合整棵子树；否则按命中项过滤。
      *
@@ -614,16 +626,16 @@ class BookmarksTree(
         scopeMatches: Boolean,
         spines: MutableMap<String, FavoritesListSpine>
     ) {
-        // ////////////////  准备数据：可见集合与自己的集合 id  start  /////////////////////
+        // ////////////////  准备数据：共享仓库 + 来源项目配置（顺带完成旧订阅迁移）  start  //
         val store = runCatching { SharedBookmarkStore.getInstance() }.getOrNull() ?: return
-        val collections = store.visibleCollections(project)
+        val sourcePaths = store.configuredSourceProjects(project)
         val ownId = store.collectionOf(project).id
+        val collections = store.visibleCollections(project)
         // ////////////////  准备数据  end  /////////////////////////////////////////////
 
-        // ////////////////  分支一：空态（无自己数据且无订阅）显示提示叶子  start  ////////
+        // ////////////////  分支一：空态（无自己数据且未配置来源项目）显示提示叶子  start  //
         val ownHasData = collections.firstOrNull { it.id == ownId }?.core?.getTotalCount()?.let { it > 0 } == true
-        val hasSubscribed = collections.any { it.id != ownId }
-        if (!ownHasData && !hasSubscribed) {
+        if (!ownHasData && sourcePaths.isEmpty()) {
             if (query.isEmpty() || scopeMatches) {
                 parentNode.add(DefaultMutableTreeNode(SharedEmptyHintNode(), false))
             }
@@ -631,36 +643,73 @@ class BookmarksTree(
         }
         // ////////////////  分支一  end  ///////////////////////////////////////////////
 
-        // ////////////////  分支二：按集合分组构建子树  start  ///////////////////////////
+        // ////////////////  分支二：自己的集合 + 旧订阅遗留集合子树  start  ////////////////
         for (collection in collections) {
             val mine = collection.id == ownId
             // 自己集合无数据且无自定义分组时跳过（避免出现空「我的共享」层，减少噪音）
             val ownEmptySkip = mine && collection.core.getTotalCount() == 0 &&
                 collection.core.getLists().all { it.name == Bookmark.DEFAULT_LIST_NAME }
             if (ownEmptySkip) continue
-
-            val view = SharedCollectionManagerView(collection)
-            val displayText = if (mine) {
-                "我的共享（${collection.ownerProjectName}）"
-            } else {
-                "共享自：${collection.ownerProjectName}"
-            }
-            // 集合显示名/来源项目名/来源路径命中时放行该集合整棵子树
-            val collectionMatches = query.isEmpty() || scopeMatches ||
-                displayText.lowercase(Locale.ROOT).contains(query) ||
-                collection.ownerProjectName.lowercase(Locale.ROOT).contains(query) ||
-                collection.ownerProjectPath.lowercase(Locale.ROOT).contains(query)
-
-            val collectionNode = DefaultMutableTreeNode(
-                SharedCollectionNode(
-                    collectionId = collection.id,
-                    ownerProjectName = collection.ownerProjectName,
-                    ownerProjectPath = collection.ownerProjectPath,
-                    mine = mine,
-                    totalCount = collection.core.getTotalCount()
-                )
+            buildSharedCollectionNode(
+                parentNode, query, scopeMatches, spines, collection, mine, sourceProject = false
             )
-            var hasVisibleChild = false
+        }
+        // ////////////////  分支二  end  ///////////////////////////////////////////////
+
+        // ////////////////  分支三：配置的来源项目节点（只读，空数据也显示）  start  ////////
+        val sourceCollections = SourceProjectStore.getInstance().collectionsFor(sourcePaths)
+        for (source in sourceCollections) {
+            buildSharedCollectionNode(
+                parentNode, query, scopeMatches, spines, source, mine = false, sourceProject = true
+            )
+        }
+        // ////////////////  分支三  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 构建单个共享集合/来源项目切片节点及其分组子树（分支二/三共用）：
+     * 节点用户对象 [SharedCollectionNode]，之下经 [SharedCollectionManagerView] 复用
+     * 分组 → 文件树渲染链路；过滤中未命中且无可见子级时整体隐藏
+     */
+    private fun buildSharedCollectionNode(
+        parentNode: DefaultMutableTreeNode,
+        query: String,
+        scopeMatches: Boolean,
+        spines: MutableMap<String, FavoritesListSpine>,
+        collection: SharedBookmarkStore.SharedCollection,
+        mine: Boolean,
+        sourceProject: Boolean
+    ) {
+        // ////////////////  准备数据：显示文本与过滤放行判定  start  ///////////////////////
+        val view = SharedCollectionManagerView(collection)
+        // 来源项目切片空数据（无收藏且只有默认分组）：不建分组子树，节点保持空叶子（tooltip 提示）
+        val emptySource = sourceProject && collection.core.getTotalCount() == 0 &&
+            collection.core.getLists().all { it.name == Bookmark.DEFAULT_LIST_NAME }
+        val displayText = if (mine) {
+            "我的共享（${collection.ownerProjectName}）"
+        } else {
+            "共享自：${collection.ownerProjectName}"
+        }
+        // 集合显示名/来源项目名/来源路径命中时放行该集合整棵子树
+        val collectionMatches = query.isEmpty() || scopeMatches ||
+            displayText.lowercase(Locale.ROOT).contains(query) ||
+            collection.ownerProjectName.lowercase(Locale.ROOT).contains(query) ||
+            collection.ownerProjectPath.lowercase(Locale.ROOT).contains(query)
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：集合节点 + 分组子树  start  /////////////////////////
+        val collectionNode = DefaultMutableTreeNode(
+            SharedCollectionNode(
+                collectionId = collection.id,
+                ownerProjectName = collection.ownerProjectName,
+                ownerProjectPath = collection.ownerProjectPath,
+                mine = mine,
+                totalCount = collection.core.getTotalCount(),
+                sourceProject = sourceProject
+            )
+        )
+        var hasVisibleChild = false
+        if (!emptySource) {
             for (topInfo in view.childrenOf(ListInfo.ROOT_PARENT_ID)) {
                 if (buildListSubtree(
                         collectionNode,
@@ -676,13 +725,13 @@ class BookmarksTree(
                     hasVisibleChild = true
                 }
             }
-            collectionNode.allowsChildren = collectionNode.childCount > 0
-
-            // 过滤中且集合未命中、无任何可见子级时整体隐藏
-            if (query.isNotEmpty() && !collectionMatches && !hasVisibleChild) continue
-            parentNode.add(collectionNode)
         }
-        // ////////////////  分支二  end  ///////////////////////////////////////////////
+        collectionNode.allowsChildren = collectionNode.childCount > 0
+
+        // 过滤中且集合未命中、无任何可见子级时整体隐藏
+        if (query.isNotEmpty() && !collectionMatches && !hasVisibleChild) return
+        parentNode.add(collectionNode)
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
     }
 
     /**
@@ -1105,7 +1154,7 @@ class BookmarksTree(
             (clickedUserObject is ScopeNode && clickedUserObject.scope == FavoriteScope.SHARED)
         ) {
             val sharedGroup = DefaultActionGroup()
-            sharedGroup.add(object : AnAction("管理共享引用…", "打开管理共享引用对话框（勾选本项目要引用的共享集合）", null) {
+            sharedGroup.add(object : AnAction("配置共享项目…", "打开配置共享项目对话框（选择要展示其项目收藏的来源项目）", null) {
                 override fun actionPerformed(e: AnActionEvent) {
                     interactions.manageSharedRefs()
                 }
@@ -1121,13 +1170,20 @@ class BookmarksTree(
                             interactions.unshareOwnSharedCollection(clickedUserObject.collectionId)
                         }
                     })
-                } else {
-                    sharedGroup.add(object : AnAction("停止引用", "取消引用该共享集合（本项目不再显示其收藏）", null) {
+                } else if (clickedUserObject.sourceProject) {
+                    // 1.7.1 配置来源项目模型：来源项目节点右键=移除共享项目
+                    // （仅从本项目配置移除，来源项目数据不受影响）
+                    sharedGroup.add(object : AnAction(
+                        "移除共享项目",
+                        "从共享配置移除该来源项目（本项目不再显示其项目收藏，来源项目数据不受影响）",
+                        null
+                    ) {
                         override fun actionPerformed(e: AnActionEvent) {
-                            interactions.unsubscribeSharedCollection(clickedUserObject.collectionId)
+                            interactions.removeSharedSourceProject(clickedUserObject.ownerProjectPath)
                         }
                     })
                 }
+                // 旧订阅遗留集合（1.7.0）：迁移后不会出现，不再提供「停止引用」入口
             }
             val sharedPopup = ActionManager.getInstance()
                 .createActionPopupMenu("FavoritesToolWindowPopupMenu", sharedGroup)

@@ -37,9 +37,12 @@ interface SharedFavoritesListener {
  * 每个集合内持有一个共享内核 [BookmarkStoreCore]（持久化提供器适配该集合的数据切片），
  * 完全复用内核能力（增删改查/多层级分组 CRUD/助记符唯一/排序记忆/级联删除）。
  *
- * 可见性模型：
- * - 每个项目「自己的集合」（按 basePath 算 id）永远可见且可写；
- * - 项目通过 [subscribe] 订阅其它项目的集合后可见（外来集合只读，写操作一律落自己的集合）；
+ * 可见性模型（1.7.1 改版：配置来源项目）：
+ * - 每个项目「自己的集合」（按 basePath 算 id）永远可见且可写（「我的共享」，仍存于 favorites.shared.xml）；
+ * - 项目通过 [configuredSourceProjects] 配置若干来源项目根路径后，「共享收藏」根下逐来源项目
+ *   只读展示其「项目收藏」（数据由 [SourceProjectStore] 读打开项目的 BookmarkManager 或解析其
+ *   .idea/favorites.xml 得到，绝不写来源项目的任何文件，被共享项目无需任何开启动作）；
+ * - 1.7.0 旧订阅模型（refs 存集合 id）不再写入，加载后首次读取配置时自动迁移为来源项目路径并清空 refs；
  * - 同一 IDE 进程内多项目窗口共享同一实例（内存即一致）；跨 IDE 进程由后台线程
  *   按 2 秒间隔 stat favorites.shared.xml 的 mtime 兜底重载并广播（重载在后台线程做，UI 刷新由监听方 invokeLater）。
  *
@@ -67,6 +70,18 @@ class SharedBookmarkStore : Disposable {
         }
 
         /**
+         * 项目路径规范化（1.7.1 新增）：反斜杠→正斜杠、去尾部斜杠。
+         * 来源项目配置/对话框项目列表/自身排除比对统一使用，与 [collectionIdFor] 内部规则一致
+         *
+         * @param projectPath 项目根路径（原始风格即可）
+         * @return 规范化路径
+         */
+        @JvmStatic
+        fun normalizeProjectPath(projectPath: String): String {
+            return projectPath.replace('\\', '/').trimEnd('/')
+        }
+
+        /**
          * 集合 id 生成规则：ownerProjectPath 规范化（反斜杠→正斜杠、去尾部斜杠）后
          * 取 SHA-256 hex 前 16 位（同一项目多窗口/重开项目得到同一集合）
          *
@@ -76,7 +91,7 @@ class SharedBookmarkStore : Disposable {
         @JvmStatic
         fun collectionIdFor(projectPath: String): String {
             // ////////////////  准备数据：路径规范化  start  //////////////////////////////////
-            val normalized = projectPath.replace('\\', '/').trimEnd('/')
+            val normalized = normalizeProjectPath(projectPath)
             // ////////////////  准备数据  end  ///////////////////////////////////////////////
 
             // ////////////////  核心逻辑：SHA-256 hex 前 16 位  start  ///////////////////////
@@ -199,8 +214,9 @@ class SharedBookmarkStore : Disposable {
     }
 
     /**
-     * 获取当前项目可见的全部共享集合：自己的集合在前，已订阅集合按订阅顺序随后
-     * （订阅 id 已不在仓库中时静默跳过，来源项目取消共享后自然消失）
+     * 获取当前项目可见的全部共享集合（1.7.1 起仅自己的集合；
+     * 旧订阅 refs 在迁移前若仍有残留集合则继续可见，迁移后恒为 [own] 单元素）
+     * （订阅 id 已不在仓库中时静默跳过）
      *
      * @param project 当前项目
      */
@@ -211,7 +227,7 @@ class SharedBookmarkStore : Disposable {
         val result = mutableListOf(own)
         // ////////////////  准备数据  end  ///////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：按订阅顺序追加可见集合  start  //////////////////////
+        // ////////////////  核心逻辑：按旧订阅顺序追加可见集合（迁移后为空）  start  ////////
         for (id in refsHelper(project).state.refs) {
             if (id == own.id) continue
             collections[id]?.let { result.add(it) }
@@ -221,7 +237,8 @@ class SharedBookmarkStore : Disposable {
     }
 
     /**
-     * 仓库中全部集合（管理共享引用对话框用；按存储出现顺序）
+     * 仓库中全部集合（旧订阅迁移/调试用；按存储出现顺序）：
+     * 1.7.1 起配置对话框改列全部已知项目（不再列共享仓库集合）
      */
     fun listAllCollections(): List<SharedCollection> {
         ensureLoaded()
@@ -259,10 +276,12 @@ class SharedBookmarkStore : Disposable {
         return null
     }
 
-    // ==================== 订阅管理 ====================
+    // ==================== 订阅管理（1.7.0 遗留）与来源项目配置（1.7.1） ====================
 
     /**
-     * 订阅共享集合（写项目级引用存储，幂等；顺序保持首次订阅位置）
+     * 订阅共享集合（1.7.0 旧订阅模型遗留入口，写项目级引用存储，幂等）。
+     * 1.7.1 起 UI 已不再调用（改为 [setConfiguredSourceProjects] 来源项目配置），
+     * 方法保留仅为旧数据兼容与既有单元测试过渡。
      *
      * @param project 当前项目
      * @param collectionId 目标集合 id
@@ -277,13 +296,77 @@ class SharedBookmarkStore : Disposable {
     }
 
     /**
-     * 取消订阅共享集合（写项目级引用存储；未订阅时无副作用）
+     * 取消订阅共享集合（1.7.0 旧订阅模型遗留入口；未订阅时无副作用）。
+     * 保留原因同 [subscribe]。
      *
      * @param project 当前项目
      * @param collectionId 目标集合 id
      */
     fun unsubscribe(project: Project, collectionId: String) {
         refsHelper(project).state.refs.remove(collectionId)
+    }
+
+    /**
+     * 取当前项目已配置的来源项目根路径列表（1.7.1 新增，规范化正斜杠、按配置顺序）。
+     * 首次读取时顺带完成 1.7.0 旧订阅数据迁移（见 [migrateLegacyRefsIfNeeded]）
+     *
+     * @param project 当前项目
+     * @return 来源项目路径列表（可能为空）
+     */
+    fun configuredSourceProjects(project: Project): List<String> {
+        val helper = refsHelper(project)
+        migrateLegacyRefsIfNeeded(project, helper)
+        return helper.state.sourceProjects.toList()
+    }
+
+    /**
+     * 保存来源项目配置（1.7.1 新增，整体覆盖写）：
+     * 规范化路径、去重保序，并强制排除当前项目自身（单向选择，不能选自己）。
+     * 仅写本项目 favorites.shared.refs.xml，绝不触碰来源项目的任何文件
+     *
+     * @param project 当前项目
+     * @param sourcePaths 来源项目根路径列表（原始风格即可，内部统一规范化）
+     */
+    fun setConfiguredSourceProjects(project: Project, sourcePaths: List<String>) {
+        // ////////////////  准备数据：规范化 + 去重 + 排除自身  start  ////////////////////
+        val own = normalizeProjectPath(project.basePath ?: "")
+        val normalized = sourcePaths.map { normalizeProjectPath(it) }
+            .filter { it.isNotEmpty() && it != own }
+            .distinct()
+        // ////////////////  准备数据  end  ///////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：整体覆盖写项目级配置  start  ////////////////////////
+        val helper = refsHelper(project)
+        helper.state.sourceProjects.clear()
+        helper.state.sourceProjects.addAll(normalized)
+        helper.state.refs.clear()
+        // ////////////////  核心逻辑  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 旧订阅数据迁移（1.7.0 → 1.7.1，尽力而为）：
+     * refs 非空时，把每个旧集合 id 经 [listAllCollections] 映射回 ownerProjectPath 转入
+     * sourceProjects（去重、排除自身），映射不到的 id 直接丢弃，最后清空 refs。
+     * 迁移只发生一次（refs 清空后不再进入）
+     */
+    private fun migrateLegacyRefsIfNeeded(project: Project, helper: SharedRefStorageHelper) {
+        // ////////////////  校验参数：无旧订阅数据则无需迁移  start  //////////////////////
+        if (helper.state.refs.isEmpty()) return
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  准备数据：旧集合 id → 来源项目路径映射  start  ///////////////
+        val idToPath = listAllCollections().associate { it.id to normalizeProjectPath(it.ownerProjectPath) }
+        val own = normalizeProjectPath(project.basePath ?: "")
+        val converted = helper.state.refs.mapNotNull { idToPath[it] }
+            .filter { it.isNotEmpty() && it != own }
+            .filter { it !in helper.state.sourceProjects }
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：转入 sourceProjects 并清空旧 refs  start  ///////////
+        helper.state.sourceProjects.addAll(converted)
+        helper.state.refs.clear()
+        log.info("共享收藏旧订阅数据已迁移为来源项目配置：转换 ${converted.size} 项（项目=${project.name}）")
+        // ////////////////  核心逻辑  end  ///////////////////////////////////////////////
     }
 
     /**
