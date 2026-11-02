@@ -1,11 +1,15 @@
 package com.aogg.favorites.model
 
 /**
- * 收藏作用域枚举（1.2.0 双作用域模型）
+ * 收藏作用域枚举（1.2.0 双作用域模型，1.7.0 起三作用域）
  *
- * 一个收藏位置在添加时必须二选一归属某个作用域，两个作用域各自持久化、互不干扰：
+ * 一个收藏位置在添加时必须二选一归属某个作用域，各作用域各自持久化、互不干扰：
  * - PROJECT：数据随项目走（.idea/favorites.xml），换项目即消失；
+ * - SHARED：数据随 IDE 应用走（favorites.shared.xml），按集合分项目存放，
+ *   其它项目「引用」后可见（外来集合只读，写操作只落自己的集合）；
  * - GLOBAL：数据随 IDE 应用走（favorites.global.xml），跨项目共享。
+ *
+ * 枚举顺序即收藏树根节点顺序：项目收藏 → 共享收藏 → 全局收藏。
  */
 enum class FavoriteScope(val label: String) {
 
@@ -13,6 +17,11 @@ enum class FavoriteScope(val label: String) {
      * 项目收藏：filePath 存相对项目根的路径（项目内可移植）
      */
     PROJECT("项目收藏"),
+
+    /**
+     * 共享收藏：filePath 存绝对路径（同 GLOBAL），按集合（来源项目）分组展示与引用
+     */
+    SHARED("共享收藏"),
 
     /**
      * 全局收藏：filePath 存绝对路径（跨项目定位同一位置）
@@ -23,7 +32,7 @@ enum class FavoriteScope(val label: String) {
         /**
          * 按名称安全解析作用域（持久化字符串 → 枚举）
          *
-         * @param name 作用域名称（PROJECT/GLOBAL）
+         * @param name 作用域名称（PROJECT/SHARED/GLOBAL）
          * @return 对应枚举；未知/空值保守回退为 PROJECT（与历史默认行为一致）
          */
         @JvmStatic

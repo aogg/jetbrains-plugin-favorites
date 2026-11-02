@@ -18,6 +18,8 @@ import javax.swing.tree.DefaultMutableTreeNode
  * 收藏树单元格渲染器（1.3.0 PhpStorm 风格，改用 ColoredTreeCellRenderer）：
  * - 主文本正常色 + 右侧灰色说明文字（SimpleTextAttributes.GRAYED_ATTRIBUTES），替代原 DefaultTreeCellRenderer
  * - 作用域节点：作用域图标 + "作用域名 (总数)"
+ * - 共享收藏集合节点（1.7.0）：自己的集合=项目图标；订阅集合=锁定图标+灰色（只读），tooltip=来源项目路径
+ * - 共享收藏空态提示节点（1.7.0）：信息图标 + 灰色提示文案
  * - 列表节点：文件夹图标 + "名称 (收藏数)"
  * - 目录节点：文件夹图标（展开/折叠同图标）+ 目录名；文件夹收藏节点灰色补充路径；目录缺失/不可读显示红叉图标
  * - 文件节点：IDE 文件类型图标（.php/.bat/.sql 等按扩展名自然区分）+ 文件名；文件收藏节点灰色补充父目录路径与描述
@@ -53,6 +55,24 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
             is ScopeNode -> {
                 icon = BookmarkIconHelper.getScopeIcon(node.scope)
                 append(node.toString())
+            }
+            // 共享收藏集合节点（1.7.0）：自己的集合=项目图标；订阅集合=锁定图标+灰色（只读），tooltip 带来源项目路径
+            is SharedCollectionNode -> {
+                icon = if (node.mine) {
+                    AllIcons.Nodes.Project
+                } else {
+                    AllIcons.Nodes.Locked
+                }
+                append(node.toString())
+                if (!node.mine) {
+                    append("（只读）", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    toolTipText = "来源项目：${node.ownerProjectPath}"
+                }
+            }
+            // 共享收藏空态提示节点（1.7.0）
+            is SharedEmptyHintNode -> {
+                icon = AllIcons.General.Information
+                append(node.toString(), SimpleTextAttributes.GRAYED_ATTRIBUTES)
             }
             // 列表节点（含收藏数徽标文案）
             is BookmarkListNode -> {

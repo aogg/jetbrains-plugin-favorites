@@ -150,12 +150,13 @@ object FavoritesScopeResolver {
     /**
      * 获取作用域对应的管理器
      *
-     * @param project 当前项目（PROJECT 作用域需要；GLOBAL 作用域忽略）
+     * @param project 当前项目（PROJECT/SHARED 作用域需要；GLOBAL 作用域忽略）
      * @param scope 目标作用域
      */
     @JvmStatic
     fun managerFor(project: Project, scope: FavoriteScope): ScopedBookmarkManager = when (scope) {
         FavoriteScope.PROJECT -> BookmarkManager.getInstance(project)
+        FavoriteScope.SHARED -> project.getService(SharedBookmarkManager::class.java)
         FavoriteScope.GLOBAL -> GlobalBookmarkManager.getInstance()
     }
 }

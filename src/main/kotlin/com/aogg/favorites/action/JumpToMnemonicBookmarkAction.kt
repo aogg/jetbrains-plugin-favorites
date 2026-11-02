@@ -17,6 +17,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
  * 从 Action ID 中提取助记符（格式：Favorites.JumpToMnemonic.[0-9/A-Z]）
  *
  * 1.2.0 双作用域：先查项目作用域，查不到再查全局作用域。
+ * 1.7.0 三作用域：跳转链改为 项目 → 共享 → 全局。
  */
 class JumpToMnemonicBookmarkAction : AnAction() {
 
@@ -41,8 +42,9 @@ class JumpToMnemonicBookmarkAction : AnAction() {
         val mnemonic = getMnemonic(e) ?: return
         val bookmarkManager = BookmarkManager.getInstance(project)
 
-        // 获取助记符对应的收藏：先查项目作用域，查不到再查全局作用域
+        // 获取助记符对应的收藏：先查项目作用域，查不到再查共享作用域，最后查全局作用域
         val bookmark = bookmarkManager.getBookmarkByMnemonic(mnemonic)
+            ?: com.aogg.favorites.model.SharedBookmarkManager.getInstance(project).getBookmarkByMnemonic(mnemonic)
             ?: com.aogg.favorites.model.GlobalBookmarkManager.getInstance().getBookmarkByMnemonic(mnemonic)
             ?: return
 
@@ -59,9 +61,10 @@ class JumpToMnemonicBookmarkAction : AnAction() {
             return
         }
 
-        // 助记符在任一作用域存在即可跳转（先项目后全局）
+        // 助记符在任一作用域存在即可跳转（先项目后共享再全局）
         val bookmarkManager = BookmarkManager.getInstance(project)
         val bookmark = bookmarkManager.getBookmarkByMnemonic(mnemonic)
+            ?: com.aogg.favorites.model.SharedBookmarkManager.getInstance(project).getBookmarkByMnemonic(mnemonic)
             ?: com.aogg.favorites.model.GlobalBookmarkManager.getInstance().getBookmarkByMnemonic(mnemonic)
         e.presentation.isEnabled = bookmark != null
 

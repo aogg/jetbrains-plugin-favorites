@@ -2,6 +2,7 @@ package com.aogg.favorites.listener
 
 import com.aogg.favorites.helper.BookmarkRefreshHelper
 import com.aogg.favorites.model.BookmarkManager
+import com.aogg.favorites.model.SharedBookmarkManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -15,8 +16,9 @@ import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent
  * 项目级收藏监听器：
  * - 处理文件/文件夹删除：清理对应收藏（含子路径）
  * - 处理文件/文件夹重命名、移动：同步更新收藏的相对路径
+ * - 1.7.0 共享收藏：删除/移动/重命名同步清理与更新【自己集合】内的共享收藏（绝对路径匹配，外来集合不动）
  *
- * 注意：收藏使用相对项目根目录的路径保存（Bookmark.filePath）。
+ * 注意：项目收藏使用相对项目根目录的路径保存（Bookmark.filePath）；共享收藏存绝对路径。
  */
 class BookmarkProjectListener(private val project: Project) : BulkFileListener {
 
@@ -26,6 +28,7 @@ class BookmarkProjectListener(private val project: Project) : BulkFileListener {
         if (project.isDisposed) return
 
         val manager = BookmarkManager.getInstance(project)
+        val sharedManager = SharedBookmarkManager.getInstance(project)
         var changed = false
         var removedCount = 0
         var updatedCount = 0
@@ -36,10 +39,15 @@ class BookmarkProjectListener(private val project: Project) : BulkFileListener {
                     val rel = toRelativePath(event.path) ?: continue
                     val includeChildren = event.file.isDirectory
                     val removed = manager.removeBookmarksByPath(rel, includeChildren)
+                    // 共享收藏（自己集合）：按绝对路径清理，外来集合不动
+                    removedCount += sharedManager.removeBookmarksByPath(
+                        event.path.replace('\\', '/'),
+                        includeChildren
+                    )
                     if (removed > 0) {
                         removedCount += removed
-                        changed = true
                     }
+                    changed = true
                 }
 
                 is VFileMoveEvent -> {
@@ -47,10 +55,16 @@ class BookmarkProjectListener(private val project: Project) : BulkFileListener {
                     val oldAbs = joinPath(event.oldParent.path, file.name)
                     val newAbs = joinPath(event.newParent.path, file.name)
                     val updateResult = updateForMoveOrRename(file, oldAbs, newAbs, manager)
+                    // 共享收藏（自己集合）：绝对路径随文件移动/重命名更新，外来集合不动
+                    updatedCount += sharedManager.updateBookmarksPath(
+                        oldAbs.replace('\\', '/'),
+                        newAbs.replace('\\', '/'),
+                        file.isDirectory
+                    )
                     if (updateResult > 0) {
                         updatedCount += updateResult
-                        changed = true
                     }
+                    changed = true
                 }
 
                 is VFilePropertyChangeEvent -> {
@@ -62,10 +76,16 @@ class BookmarkProjectListener(private val project: Project) : BulkFileListener {
                     val oldAbs = joinPath(parentPath, oldName)
                     val newAbs = joinPath(parentPath, newName)
                     val updateResult = updateForMoveOrRename(file, oldAbs, newAbs, manager)
+                    // 共享收藏（自己集合）：绝对路径随重命名更新，外来集合不动
+                    updatedCount += sharedManager.updateBookmarksPath(
+                        oldAbs.replace('\\', '/'),
+                        newAbs.replace('\\', '/'),
+                        file.isDirectory
+                    )
                     if (updateResult > 0) {
                         updatedCount += updateResult
-                        changed = true
                     }
+                    changed = true
                 }
             }
         }

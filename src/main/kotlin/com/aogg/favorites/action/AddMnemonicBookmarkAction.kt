@@ -24,8 +24,8 @@ import java.util.*
  * - 先弹选择（1.5.x 升级为 [com.aogg.favorites.ui.ScopeGroupChooserPopup] 分组树：
  *   默认高亮上次使用的「作用域+分组」，选择后记住）；
  * - 再打开 MnemonicSelectorDialog（标题/提示带作用域名，占用检测按该作用域）；
- * - 同一位置的旧助记符收藏（两个作用域都查）在新增时被替换，维持"重新设置助记符"语义；
- * - 加入 GLOBAL 时写入绝对路径；项目外位置只能加入 GLOBAL。
+ * - 同一位置的旧助记符收藏（各作用域都查）在新增时被替换，维持"重新设置助记符"语义；
+ * - 加入 GLOBAL/SHARED 时写入绝对路径；项目外位置只能加入 GLOBAL/SHARED。
  *
  * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
  * 固定作用域入口（如原生 ToggleBookmarkWithMnemonic 委托）不弹作用域选择，
@@ -222,7 +222,7 @@ class AddMnemonicBookmarkAction : AnAction("添加助记收藏", "添加助记�
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：写入新助记符收藏（GLOBAL=绝对路径；listName=目标分组）  start  ///
+        // ////////////////  核心逻辑：写入新助记符收藏（GLOBAL/SHARED=绝对路径；listName=目标分组）  start  ///
         val bookmark = Bookmark(
             id = UUID.randomUUID().toString(),
             type = location.type,

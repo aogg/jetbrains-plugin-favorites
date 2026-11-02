@@ -24,8 +24,8 @@ import java.util.*
  * 1.2.0 双作用域语义：
  * - 若目标位置在任一作用域已存在收藏 → 维持原有切换语义：直接移除并通知（不弹选择）；
  * - 否则弹出选择（1.5.x 升级为 [com.aogg.favorites.ui.ScopeGroupChooserPopup] 分组树：
- *   默认高亮上次使用的「作用域+分组」，选择后记住），加入 GLOBAL 时写入绝对路径；
- *   项目外位置只能加入 GLOBAL；
+ *   默认高亮上次使用的「作用域+分组」，选择后记住），加入 GLOBAL/SHARED 时写入绝对路径；
+ *   项目外位置只能加入 GLOBAL/SHARED；
  * - 项目视图多选批量：只弹一次选择，全部加入同一「作用域+分组」。
  *
  * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
@@ -197,7 +197,7 @@ class AddAnonymousBookmarkAction : AnAction("添加收藏", "添加收藏", null
         toRemove.forEach { removeBookmark(project, it) }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：按作用域写入收藏（GLOBAL=绝对路径）  start  /////////
+        // ////////////////  核心逻辑：按作用域写入收藏（GLOBAL/SHARED=绝对路径）  start  /////////
         val manager = FavoritesScopeResolver.managerFor(project, scope)
         var successCount = 0
         var skipped = 0

@@ -29,27 +29,34 @@ data class TransferResult(
 }
 
 /**
- * 收藏跨作用域转移服务（1.2.0 新增）
+ * 收藏跨作用域转移服务（1.2.0 新增，1.7.0 起覆盖三作用域）
  *
  * 转移 = 移动而非复制：原作用域删除、目标作用域新增，保留 id/createdTime/description/type/lineNumber。
+ * 共享收藏例外（1.7.0）：
+ * - 任何作用域 → SHARED：移动（删源、写入自己集合）；
+ * - SHARED 且收藏属于自己集合 → 其它作用域：移动（现状语义）；
+ * - SHARED 且收藏属于外来集合 → 其它作用域：复制（外来只读，源保留不删）。
  *
  * 路径转换规则：
- * - PROJECT→GLOBAL：相对路径 → 绝对路径（project.basePath + 相对路径）；
- * - GLOBAL→PROJECT：仅当绝对路径位于 basePath 之下才转相对路径，否则失败（UI 弹错误提示）。
+ * - →SHARED：源 PROJECT 相对→绝对；源 GLOBAL/SHARED 绝对原样（统一正斜杠）；
+ * - →PROJECT：绝对路径仅当位于 basePath 之下才转相对路径，否则失败（UI 弹错误提示）；
+ * - →GLOBAL：源 PROJECT 相对→绝对；源 SHARED/PROJECT 绝对原样（统一正斜杠）。
  *
  * 助记符规则：目标作用域被占用时降级为匿名收藏（与"导入原生书签"策略一致）。
  *
- * 说明：本类为普通类（非平台 @Service），构造函数接收两个管理器，便于单元测试
+ * 说明：本类为普通类（非平台 @Service），构造函数接收三个管理器，便于单元测试
  * 直接以 mock Project + 注入假存储的管理器实例化（平台服务无法脱离 IDE 容器构造）。
  *
  * @param project 当前项目（提供 basePath 做路径换算）
  * @param projectManager 项目作用域管理器
  * @param globalManager 全局作用域管理器
+ * @param sharedManager 共享作用域管理器
  */
 class FavoritesTransferService(
     private val project: Project,
     private val projectManager: BookmarkManager,
-    private val globalManager: GlobalBookmarkManager
+    private val globalManager: GlobalBookmarkManager,
+    private val sharedManager: SharedBookmarkManager
 ) {
 
     companion object {
@@ -61,7 +68,8 @@ class FavoritesTransferService(
             FavoritesTransferService(
                 project,
                 BookmarkManager.getInstance(project),
-                GlobalBookmarkManager.getInstance()
+                GlobalBookmarkManager.getInstance(),
+                SharedBookmarkManager.getInstance(project)
             )
     }
 
@@ -70,6 +78,7 @@ class FavoritesTransferService(
      */
     private fun managerOf(scope: FavoriteScope) = when (scope) {
         FavoriteScope.PROJECT -> projectManager
+        FavoriteScope.SHARED -> sharedManager
         FavoriteScope.GLOBAL -> globalManager
     }
 
@@ -105,9 +114,15 @@ class FavoritesTransferService(
             ?: return TransferResult.fail("收藏不存在或已被删除")
         // ////////////////  校验参数  end  ////////////////////////////////////////////////
 
-        // ////////////////  准备数据：路径换算  start  ////////////////////////////////////////////////
+        // ////////////////  准备数据：复制语义判定（外来共享只读，转移为复制）  start  ///////
+        val copyInsteadOfMove = from == FavoriteScope.SHARED &&
+            sharedManager.isForeignBookmark(bookmarkId)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////////
+
+        // ////////////////  准备数据：路径换算  start  ////////////////////////////////////
         val convertedPath: String? = when (to) {
-            FavoriteScope.GLOBAL -> toAbsoluteForGlobal(bookmark.filePath)
+            // →SHARED 与 →GLOBAL 同为绝对路径语义：相对拼项目根，绝对原样统一正斜杠
+            FavoriteScope.GLOBAL, FavoriteScope.SHARED -> toAbsoluteForGlobal(bookmark.filePath)
             FavoriteScope.PROJECT -> toRelativeForProject(bookmark.filePath)
         }
         if (convertedPath == null) {
@@ -115,20 +130,20 @@ class FavoritesTransferService(
                 "该收藏位于项目目录之外，无法转移到项目收藏（项目收藏只支持项目内路径）"
             )
         }
-        // ////////////////  准备数据：路径换算  end  ////////////////////////////////////////////////
+        // ////////////////  准备数据：路径换算  end  ////////////////////////////////////
 
-        // ////////////////  准备数据：目标列表兜底  start  ////////////////////////////////////////////////
+        // ////////////////  准备数据：目标列表兜底  start  //////////////////////////////////
         // UI 只会给出目标作用域已有的列表名；这里防御性兜底：列表缺失时并入默认列表，绝不丢收藏
         val finalListName = if (target.hasList(targetListName)) targetListName else Bookmark.DEFAULT_LIST_NAME
-        // ////////////////  准备数据：目标列表兜底  end  ////////////////////////////////////////////////
+        // ////////////////  准备数据：目标列表兜底  end  //////////////////////////////////
 
         // ////////////////  准备数据：助记符占用检测（转移前判定，失败即降级为匿名）  start  ////////////
         val mnemonic = bookmark.mnemonic
         val downgradeToAnonymous = mnemonic != null && !target.isMnemonicAvailable(mnemonic)
         // ////////////////  准备数据：助记符占用检测  end  //////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：移动而非复制（先删源、再入目标）  start  ////////////////////////
-        if (!source.removeBookmark(bookmarkId)) {
+        // ////////////////  核心逻辑：移动而非复制（先删源、再入目标；外来共享复制跳过删源）  start  //
+        if (!copyInsteadOfMove && !source.removeBookmark(bookmarkId)) {
             return TransferResult.fail("收藏不存在或已被删除")
         }
         // 保留 id/createdTime/description/type/lineNumber；仅转换路径/列表/助记符
@@ -139,8 +154,10 @@ class FavoritesTransferService(
         )
         val added = target.addBookmark(transferred)
         if (!added) {
-            // 理论不可达（匿名收藏不会冲突）：兜底回滚，保证不丢数据
-            source.addBookmark(bookmark)
+            // 理论不可达（匿名收藏不会冲突）：兜底回滚，保证不丢数据（复制语义无源可回滚）
+            if (!copyInsteadOfMove) {
+                source.addBookmark(bookmark)
+            }
             return TransferResult.fail("转移失败：目标作用域写入收藏失败")
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////////
@@ -151,7 +168,8 @@ class FavoritesTransferService(
     }
 
     /**
-     * 项目→全局：相对路径转绝对路径（已是绝对路径则原样返回并统一分隔符）
+     * 相对路径转绝对路径（已是绝对路径则原样返回并统一分隔符）：
+     * PROJECT→GLOBAL 与 *→SHARED 共用同一规则
      *
      * @return 绝对路径
      */
@@ -164,7 +182,7 @@ class FavoritesTransferService(
     }
 
     /**
-     * 全局→项目：绝对路径仅当位于 basePath 之下才转相对路径
+     * 绝对路径→项目相对路径：仅当位于 basePath 之下才转相对路径
      *
      * @return 相对路径；位于项目之外返回 null（调用方返回失败）
      */

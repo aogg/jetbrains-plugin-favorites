@@ -33,11 +33,11 @@ interface ScopedAddAction {
 }
 
 /**
- * 添加收藏动作的共享支撑（1.2.0 新增）
+ * 添加收藏动作的共享支撑（1.2.0 新增，1.7.0 起三作用域）
  *
- * 统一"目标位置"描述与双作用域的存在性检测，供匿名/助记符两个添加动作复用：
- * - 项目作用域按【相对路径】匹配；全局作用域按【绝对路径】匹配；
- * - 项目外的位置只可能存在于全局作用域（项目收藏无法保存）。
+ * 统一"目标位置"描述与三作用域的存在性检测，供匿名/助记符两个添加动作复用：
+ * - 项目作用域按【相对路径】匹配；共享/全局作用域按【绝对路径】匹配（共享收藏写入绝对路径）；
+ * - 项目外的位置只可能存在于共享/全局作用域（项目收藏无法保存）。
  */
 object AddActionSupport {
 
@@ -99,11 +99,11 @@ object AddActionSupport {
     /**
      * 按作用域取该位置的存储路径
      *
-     * @return 项目作用域→相对路径；全局作用域→绝对路径；项目作用域+项目外→null（无法收藏）
+     * @return 项目作用域→相对路径；共享/全局作用域→绝对路径；项目作用域+项目外→null（无法收藏）
      */
     fun storagePathFor(scope: FavoriteScope, location: PendingLocation): String? = when (scope) {
         FavoriteScope.PROJECT -> location.relativePath
-        FavoriteScope.GLOBAL -> location.absolutePath
+        FavoriteScope.SHARED, FavoriteScope.GLOBAL -> location.absolutePath
     }
 
     /**
@@ -132,10 +132,11 @@ object AddActionSupport {
     }
 
     /**
-     * 检测某位置在两个作用域内是否已存在收藏（用于添加时的切换语义判定）
+     * 检测某位置在各作用域内是否已存在收藏（用于添加时的切换语义判定）
      *
      * @param extra 附加过滤（如仅匿名收藏、仅助记符收藏），与历史行为保持一致
-     * @return 命中的收藏（带作用域；项目作用域按相对路径匹配，全局作用域按绝对路径匹配）
+     * @return 命中的收藏（带作用域；项目作用域按相对路径匹配，共享/全局作用域按绝对路径匹配，
+     *         顺序 项目 → 共享 → 全局）
      */
     fun findExisting(
         project: Project,
@@ -151,6 +152,12 @@ object AddActionSupport {
                 .forEach { result.add(ScopedBookmark(FavoriteScope.PROJECT, it)) }
         }
         // ////////////////  核心逻辑：项目作用域  end  /////////////////////////////////
+
+        // ////////////////  核心逻辑：共享作用域按绝对路径匹配（自己+订阅集合聚合）  start  /
+        com.aogg.favorites.model.SharedBookmarkManager.getInstance(project).getAllBookmarks()
+            .filter { matchesLocation(it, location.absolutePath, location, extra) }
+            .forEach { result.add(ScopedBookmark(FavoriteScope.SHARED, it)) }
+        // ////////////////  核心逻辑：共享作用域  end  /////////////////////////////////
 
         // ////////////////  核心逻辑：全局作用域按绝对路径匹配  start  ///////////////////
         GlobalBookmarkManager.getInstance().getAllBookmarks()

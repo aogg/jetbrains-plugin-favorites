@@ -54,10 +54,11 @@ object BookmarkIconHelper {
     /**
      * 获取作用域节点图标（树第一层 / 弹窗分组用）
      *
-     * @param scope 作用域（项目=项目图标；全局=地球图标）
+     * @param scope 作用域（项目=项目图标；共享=分享图标；全局=地球图标）
      */
     fun getScopeIcon(scope: FavoriteScope): Icon = when (scope) {
         FavoriteScope.PROJECT -> AllIcons.Nodes.Project
+        FavoriteScope.SHARED -> AllIcons.Actions.Share
         FavoriteScope.GLOBAL -> AllIcons.General.Web
     }
 

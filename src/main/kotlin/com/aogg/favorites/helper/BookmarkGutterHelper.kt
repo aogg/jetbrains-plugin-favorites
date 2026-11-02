@@ -4,6 +4,7 @@ import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
 import com.aogg.favorites.model.GlobalBookmarkManager
+import com.aogg.favorites.model.SharedBookmarkManager
 import com.intellij.codeInsight.daemon.LineMarkerInfo
 import com.intellij.codeInsight.daemon.LineMarkerProvider
 import com.intellij.openapi.editor.markup.GutterIconRenderer
@@ -17,7 +18,8 @@ import com.intellij.psi.PsiWhiteSpace
  *
  * 1.2.0 双作用域：当前文件的行收藏图标同时覆盖两个作用域——
  * 项目作用域按【相对路径】匹配、全局作用域按【绝对路径】匹配；
- * 两个作用域都使用行收藏索引（O(1) 查找），保持现有性能（避免全量扫描）。
+ * 1.7.0 三作用域：共享收藏（自己+订阅集合，按【绝对路径】匹配）并入查询，
+ * 优先级 项目 → 共享 → 全局；三个作用域都使用行收藏索引（O(1) 查找），保持现有性能（避免全量扫描）。
  */
 class BookmarkGutterHelper : LineMarkerProvider {
 
@@ -72,7 +74,7 @@ class BookmarkGutterHelper : LineMarkerProvider {
     }
 
     /**
-     * 查询两个作用域内某文件某行的行收藏（均走索引，避免全量扫描）
+     * 查询各作用域内某文件某行的行收藏（均走索引，避免全量扫描）
      *
      * @param project 当前项目
      * @param absolutePath 文件绝对路径（VFS 风格正斜杠）
@@ -86,12 +88,16 @@ class BookmarkGutterHelper : LineMarkerProvider {
         } ?: emptyList()
         // ////////////////  项目作用域  end  //////////////////////////////////////////
 
+        // ////////////////  共享作用域：绝对路径匹配（自己+订阅集合聚合）  start  //////////
+        val sharedHits = SharedBookmarkManager.getInstance(project).getLineBookmarks(absolutePath, lineNumber)
+        // ////////////////  共享作用域  end  //////////////////////////////////////////
+
         // ////////////////  全局作用域：绝对路径匹配  start  ////////////////////////////
         val globalHits = GlobalBookmarkManager.getInstance().getLineBookmarks(absolutePath, lineNumber)
         // ////////////////  全局作用域  end  //////////////////////////////////////////
 
-        // ////////////////  返回：项目作用域在前（优先展示）  start  ////////////////////
-        return projectHits + globalHits
+        // ////////////////  返回：项目→共享→全局 依次在前（优先展示）  start  ///////////
+        return projectHits + sharedHits + globalHits
         // ////////////////  返回  end  ///////////////////////////////////////////////
     }
 

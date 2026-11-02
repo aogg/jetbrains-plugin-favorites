@@ -34,8 +34,9 @@ import javax.swing.tree.TreePath
  * 添加收藏时的「作用域 + 分组」树选择弹窗（1.5.x 新增，替代 AddScopeChooser 的职责）
  *
  * 行为约定（与需求一致）：
- * - 弹分组树：根为两个作用域节点「项目收藏」「全局收藏」（沿用 BookmarkIconHelper.getScopeIcon 图标），
- *   其下按 childrenOf 递归展示该作用域的分组树（含默认列表「收藏」置顶；默认列表不可作为子分组但可选为目标）；
+ * - 弹分组树：根为作用域节点「项目收藏」「共享收藏」「全局收藏」（沿用 BookmarkIconHelper.getScopeIcon 图标），
+ *   其下按 childrenOf 递归展示该作用域的分组树（含默认列表「收藏」置顶；默认列表不可作为子分组但可选为目标；
+ *   共享收藏的分组只取自己集合的分组，写入路径按绝对路径处理）；
  * - 输入即过滤：连续键入字母/数字时按「作用域名/分组完整路径」做前置匹配（自带过滤，兼容 233~262），
  *   命中即选中并滚动到位，短暂停顿自动清空过滤词；
  * - Enter / 双击 = 选中该「作用域+分组」（选中作用域根节点等价于选其默认列表「收藏」）；
@@ -146,7 +147,8 @@ object ScopeGroupChooserPopup {
     }
 
     /**
-     * 构建整棵选择树：两个作用域根节点，其下按 childrenOf 递归挂分组子树
+     * 构建整棵选择树：作用域根节点（项目收藏/共享收藏/全局收藏），其下按 childrenOf 递归挂分组子树
+     * （共享收藏的分组只取自己集合的分组——写操作只落自己集合，外来集合分组不作为写入目标）
      *
      * @param project 当前项目
      * @return 不可见根节点
@@ -177,8 +179,13 @@ object ScopeGroupChooserPopup {
         parentNode: DefaultMutableTreeNode,
         visited: MutableSet<String>
     ) {
-        // 平台 API 兜底：管理器/查询失败时按空子树处理，绝不阻断弹窗
-        val manager = runCatching { FavoritesScopeResolver.managerFor(project, scope) }.getOrNull()
+        // 平台 API 兜底：管理器/查询失败时按空子树处理，绝不阻断弹窗。
+        // 共享收藏目标分组只取自己集合的分组（写操作只落自己集合，外来集合只读不作为目标）
+        val manager = if (scope == FavoriteScope.SHARED) {
+            runCatching { com.aogg.favorites.model.SharedBookmarkManager.getInstance(project).ownCollectionManager() }.getOrNull()
+        } else {
+            runCatching { FavoritesScopeResolver.managerFor(project, scope) }.getOrNull()
+        }
         val children = manager?.let { runCatching { it.childrenOf(parentGroupId) }.getOrDefault(emptyList()) }
             ?: emptyList()
 

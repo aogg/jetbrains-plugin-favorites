@@ -176,7 +176,8 @@ internal class FavoritesListSpine private constructor(
             // ////////////////  校验参数  end  ///////////////////////////////////////////
 
             // ////////////////  准备数据：拆分 文件/行收藏 与 文件夹收藏  start  ////////////
-            val absolute = scope == FavoriteScope.GLOBAL
+            // 共享/全局作用域均为绝对路径语义（共享收藏 filePath 存绝对路径，同全局）
+            val absolute = scope != FavoriteScope.PROJECT
             // 文件/行收藏：保持公共祖先链（挂靠父目录）
             val fileLikeBookmarks = bookmarks.filterNot { it.isFolderBookmark() }
             val fileDirSegs = fileLikeBookmarks.map { FavoritesTreePaths.segments(it.filePath).dropLast(1) }
