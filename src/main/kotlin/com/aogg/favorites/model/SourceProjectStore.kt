@@ -74,7 +74,8 @@ class SourceProjectStore {
      */
     fun collectionsFor(sourceRootPaths: List<String>): List<SharedBookmarkStore.SharedCollection> {
         // ////////////////  核心逻辑：逐来源项目构建只读切片  start  ///////////////////////
-        val projectManager = ProjectManager.getInstanceIfCreated()
+        // 无 Application（裸 JVM 单测）时 233 的 getInstanceIfCreated() 内部不判空会 NPE，先判空再取（IDE 内行为不变）
+        val projectManager = ApplicationManager.getApplication()?.let { ProjectManager.getInstanceIfCreated() }
         return sourceRootPaths.map { path ->
             val normalized = SharedBookmarkStore.normalizeProjectPath(path)
             collectionFor(normalized, projectManager)
@@ -284,7 +285,8 @@ class SourceProjectStore {
      * 按规范化根路径查找本 IDE 已打开的来源项目（多开同路径项目取首个未关闭的）
      */
     private fun findOpenProject(normalizedPath: String): Project? {
-        val projectManager = ProjectManager.getInstanceIfCreated() ?: return null
+        // 无 Application（裸 JVM 单测）时 233 的 getInstanceIfCreated() 内部不判空会 NPE，先判空再取（IDE 内行为不变）
+        val projectManager = ApplicationManager.getApplication()?.let { ProjectManager.getInstanceIfCreated() } ?: return null
         return projectManager.openProjects.firstOrNull {
             !it.isDisposed && SharedBookmarkStore.normalizeProjectPath(it.basePath ?: "") == normalizedPath
         }
