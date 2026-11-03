@@ -15,14 +15,16 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /**
- * SharedBookmarkStore（应用级共享收藏仓库）核心逻辑单元测试（1.7.0 新增）
+ * SharedBookmarkStore（应用级共享收藏仓库）核心逻辑单元测试（1.7.0 新增，1.7.1 适配配置来源项目模型）
  *
  * 说明：
  * - 通过 SharedStoreTestSupport 注入 mock Application 后构造仓库，再注入真实例假存储
  *   （SharedBookmarkStorageHelper 无参构造），State 可直接检查「写落盘」内容
- * - 项目级订阅引用走注入的真实例 SharedRefStorageHelper（state.refs 可直接断言）
- * - 覆盖：collectionIdFor 稳定/唯一/归一、集合创建幂等、可见集合=自己+订阅且自己在前、
+ * - 项目级订阅引用走注入的真实例 SharedRefStorageHelper（state.refs/sourceProjects 可直接断言）
+ * - 1.7.0 遗留行为：collectionIdFor 稳定/唯一/归一、集合创建幂等、可见集合=自己+旧订阅且自己在前、
  *   subscribe/unsubscribe 往返、removeCollection 只删自己集合、写操作落盘（owner 信息/更新时间）
+ * - 1.7.1 配置来源项目模型：setConfiguredSourceProjects 规范化/去重/排除自身/覆盖写并清空旧 refs、
+ *   旧订阅 refs 惰性迁移（映射回 ownerProjectPath、丢弃映射不到的、排除自身、清空 refs）
  */
 class SharedBookmarkStoreTest {
 
@@ -228,5 +230,143 @@ class SharedBookmarkStoreTest {
 
         // 都未命中：返回 null
         assertNull(store.collectionOfBookmark(project, "不存在"), "未命中的收藏应返回 null")
+    }
+
+    // ==================== 来源项目配置（1.7.1） ====================
+
+    @Test
+    fun `set configured source projects should normalize dedupe exclude self and drop blank`() {
+        // ////////////////  核心逻辑：规范化+去重+排除自身+去空白  start  /////////////////
+        store.setConfiguredSourceProjects(
+            project,
+            listOf("/src/one/", "\\src\\two\\", "/src/one", "", "/projA", "/projA/")
+        )
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：规范化正斜杠、去尾斜杠、首现保序去重、空串与自身剔除  //
+        assertEquals(
+            listOf("/src/one", "/src/two"),
+            store.configuredSourceProjects(project),
+            "应只保留规范化去重后且非自身的来源项目"
+        )
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    @Test
+    fun `set configured source projects with empty list should clear all config`() {
+        // ////////////////  准备数据：先配置一个来源项目  start  ////////////////////////
+        store.setConfiguredSourceProjects(project, listOf("/src/one"))
+        assertEquals(listOf("/src/one"), store.configuredSourceProjects(project))
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：空列表整体覆盖=清空全部配置  start  ///////////////////
+        store.setConfiguredSourceProjects(project, emptyList())
+        assertTrue(store.configuredSourceProjects(project).isEmpty(), "空配置应清空全部来源项目")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    @Test
+    fun `set configured source projects should clear legacy refs and overwrite previous config`() {
+        // ////////////////  准备数据：旧订阅模型先订阅外来集合  start  ///////////////////
+        val foreign = store.collectionOf(foreignProject)
+        store.subscribe(project, foreign.id)
+        assertEquals(listOf(foreign.id), refHelper.state.refs, "前置条件：旧订阅已在 refs 中")
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：保存配置（顺带清空旧 refs）→ 再次覆盖写  start  ///
+        store.setConfiguredSourceProjects(project, listOf("/src/one"))
+        assertTrue(refHelper.state.refs.isEmpty(), "保存配置应顺带清空旧订阅 refs")
+        assertEquals(listOf("/src/one"), store.configuredSourceProjects(project))
+
+        store.setConfiguredSourceProjects(project, listOf("/src/two"))
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：整体覆盖语义  start  /////////////////////////////////
+        assertEquals(listOf("/src/two"), store.configuredSourceProjects(project), "再次保存应为整体覆盖而非追加")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    // ==================== 旧订阅 refs 惰性迁移（1.7.0 → 1.7.1） ====================
+
+    @Test
+    fun `legacy refs should migrate to source projects on first configured read`() {
+        // ////////////////  准备数据：仓库里有两个可映射集合，refs 存旧订阅 id  start  ////
+        val foreign = store.collectionOf(foreignProject)
+        val third = store.collectionOf(SharedStoreTestSupport.mockProject("/projC", "ProjC", refHelper))
+        refHelper.state.refs.addAll(listOf(foreign.id, third.id))
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：首次读取配置触发迁移  start  //////////////////////
+        val sources = store.configuredSourceProjects(project)
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：id 映射回路径转入、refs 清空、二次读取稳定  start  ////
+        assertEquals(listOf("/projB", "/projC"), sources, "旧订阅 id 应按订阅顺序映射为来源项目路径")
+        assertTrue(refHelper.state.refs.isEmpty(), "迁移后旧订阅 refs 应清空")
+        assertEquals(listOf("/projB", "/projC"), store.configuredSourceProjects(project), "refs 清空后再次读取应稳定不重复迁移")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    @Test
+    fun `unmappable legacy refs should be discarded during migration`() {
+        // ////////////////  准备数据：一个可映射 id + 一个仓库中不存在的 id  start  ///////
+        val foreign = store.collectionOf(foreignProject)
+        refHelper.state.refs.addAll(listOf("0123456789abcdef", foreign.id))
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：映射不到的丢弃，可映射的转入，refs 仍清空  start  ////
+        assertEquals(listOf("/projB"), store.configuredSourceProjects(project), "映射不到的旧 id 应直接丢弃")
+        assertTrue(refHelper.state.refs.isEmpty(), "丢弃后旧订阅 refs 同样应清空（只迁移一次）")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    @Test
+    fun `migration should map owner path to normalized form`() {
+        // ////////////////  准备数据：直接在存储层造一个 ownerProjectPath 带尾斜杠的集合，
+        //                    并 reset 让仓库重新加载（模拟旧版本落盘的未规范化路径）  start  //
+        val idB = SharedBookmarkStore.collectionIdFor("/projB")
+        sharedHelper.state.collections[idB] = SharedBookmarkStorageHelper.SharedCollectionData(
+            id = idB,
+            ownerProjectName = "ProjB",
+            ownerProjectPath = "/projB/",
+            updatedTime = 1L
+        )
+        refHelper.state.refs.addAll(listOf(idB))
+        store.resetForTest()
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：迁移映射应做路径规范化  start  ////////////////////////
+        assertEquals(listOf("/projB"), store.configuredSourceProjects(project), "迁移后的来源路径应为规范化形式")
+        assertTrue(refHelper.state.refs.isEmpty(), "迁移后 refs 应清空")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    @Test
+    fun `migration should exclude own collection path and keep existing config`() {
+        // ////////////////  准备数据：自己的集合已在仓库 + 已配置一个来源项目，
+        //                    refs 里含自己的集合 id 与已配置项目的 id  start  ///////////
+        val own = store.collectionOf(project)
+        val foreign = store.collectionOf(foreignProject)
+        refHelper.state.sourceProjects.addAll(listOf("/projB"))
+        refHelper.state.refs.addAll(listOf(own.id, foreign.id))
+        // ////////////////  迁移前置  end  ////////////////////////////////////////////
+
+        // ////////////////  返回：自身路径被排除、已配置路径不重复追加、refs 清空  start  //
+        assertEquals(listOf("/projB"), store.configuredSourceProjects(project), "迁移应排除自身且不重复追加已配置路径")
+        assertTrue(refHelper.state.refs.isEmpty(), "迁移后 refs 应清空")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    @Test
+    fun `configured read should not migrate when refs already empty`() {
+        // ////////////////  准备数据：仅配置来源项目（迁移后典型状态）  start  ///////////
+        store.setConfiguredSourceProjects(project, listOf("/src/one"))
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：refs 为空时读取配置零副作用  start  ///////////////////
+        assertEquals(listOf("/src/one"), store.configuredSourceProjects(project), "无旧数据时读取应原样返回配置")
+        assertTrue(refHelper.state.refs.isEmpty(), "refs 应保持为空")
+        assertTrue(refHelper.state.sourceProjects.size == 1, "既有配置不应被读取动作改动")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
     }
 }
