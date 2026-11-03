@@ -253,7 +253,8 @@ class SourceProjectStore {
 
         // ////////////////  核心逻辑：定位组件元素并反序列化 State  start  ////////////////
         return try {
-            val document = JDOMUtil.load(file)
+            // 2023.3 的 JDOMUtil.load(File) 返回根 Element，此处需 Document，故用 loadDocument
+            val document = JDOMUtil.loadDocument(file)
             val component: Element = document.rootElement.getChildren("component")
                 .firstOrNull { it.getAttributeValue("name") == "FavoritesBookmarks" } ?: return null
             val state = XmlSerializer.deserialize(component, BookmarkStorageHelper.State::class.java)

@@ -5,8 +5,8 @@ import com.aogg.favorites.model.SharedBookmarkStore
 import com.aogg.favorites.model.SourceProjectStore
 import com.intellij.icons.AllIcons
 import com.intellij.ide.RecentProjectsManager
-import com.intellij.ide.RecentProjectsManagerEx
-import com.intellij.ide.RecentProjectsManagerState
+import com.intellij.ide.RecentProjectsManagerBase
+import com.intellij.ide.RecentProjectManagerState
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
@@ -128,18 +128,19 @@ class SharedRefManagerDialog(private val project: Project) : DialogWrapper(proje
 
     /**
      * 扫描 IDE 已知项目列表（含已关闭项目）：
-     * RecentProjectsManager 历史 recentPaths/openPaths 为准，当前打开项目兜底补入；
+     * RecentProjectsManager 历史 recentPaths 为准，当前打开项目兜底补入；
      * 排除当前项目自身与空路径；打开中的排前、其余按项目名排序
      */
     private fun scanProjectRows(): List<ProjectRow> {
         // ////////////////  准备数据：IDE 已知全部项目路径 + 当前配置  start  /////////////
         val ownPath = SharedBookmarkStore.normalizeProjectPath(project.basePath ?: "")
         val knownPaths = LinkedHashSet<String>()
-        val state: RecentProjectsManagerState? =
-            (RecentProjectsManager.getInstance() as? RecentProjectsManagerEx)?.state
+        // 2023.3 无 RecentProjectsManagerEx/RecentProjectsManagerState：
+        // 实现类 RecentProjectsManagerBase.getState()，state 类型 RecentProjectManagerState（仅 recentPaths）
+        val state: RecentProjectManagerState? =
+            (RecentProjectsManager.getInstance() as? RecentProjectsManagerBase)?.state
         state?.let { s ->
             s.recentPaths.forEach { knownPaths.add(SharedBookmarkStore.normalizeProjectPath(it)) }
-            s.openPaths.forEach { knownPaths.add(SharedBookmarkStore.normalizeProjectPath(it)) }
         }
         // 兜底：当前打开项目一定在列表中（历史列表未及时收录新开项目时）
         ProjectManager.getInstanceIfCreated()?.openProjects?.forEach { opened ->
