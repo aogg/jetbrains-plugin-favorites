@@ -372,7 +372,8 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  * 交互：
  * - Enter / 双击 = 跳转（行→编辑器定位；文件→打开；文件夹→Project 视图选中；未收藏真实节点同样可跳转）
  * - F2 = 编辑描述、Del = 删除（通过 [Interactions] 回调到面板实现；未收藏真实节点收藏类操作不可用）
- * - 右键菜单：跳转/编辑描述/设置助记符/移动到列表(按作用域分组、按分组层级嵌套)/分组CRUD
+ * - 右键菜单：作用域根/列表分组节点（项目/全局）首项=添加目录…（弹平台目录选择器写入收藏）；
+ *   跳转/编辑描述/设置助记符/移动到列表(按作用域分组、按分组层级嵌套)/分组CRUD
  *   （分组节点=新建子分组；选中默认列表或作用域节点=新建顶级列表；删除分组级联连删子分组）/删除收藏 + 规则匹配菜单
  * - 选中行收藏时预览打开文件但不抢焦点（openFile(file, false)）
  * - 装 TreeSpeedSearch（TreeUIHelper.installTreeSpeedSearch），各节点 toString 均参与匹配
@@ -416,6 +417,15 @@ class BookmarksTree(
          */
         fun removeSharedSourceProject(sourcePath: String)
         fun unshareOwnSharedCollection(collectionId: String)
+
+        /**
+         * 右键「添加目录…」：弹 IntelliJ 平台目录选择器（仅可选目录），把选定目录作为文件夹收藏加入
+         *
+         * @param scope 目标作用域（仅项目/全局两条线开放入口）
+         * @param listName 目标列表名（列表/分组节点=该分组自身）；null=作用域根触发，
+         *                 按现有固定作用域写入逻辑取该作用域上次使用的分组（无记忆/已删除回退默认列表）
+         */
+        fun addDirectoryTo(scope: FavoriteScope, listName: String?)
     }
 
     companion object {
@@ -1131,7 +1141,8 @@ class BookmarksTree(
 
     /**
      * 右键菜单（列表操作按选中上下文的作用域执行；未收藏真实节点仅提供跳转，收藏类操作不可用；
-     * 规则匹配子树提供独立菜单：规则根=新建/全刷、规则=刷新/编辑/启禁/删除、条目=跳转/查看详情）
+     * 规则匹配子树提供独立菜单：规则根=新建/全刷、规则=刷新/编辑/启禁/删除、条目=跳转/查看详情；
+     * 作用域根/列表分组节点（项目/全局）首项=添加目录…，弹平台目录选择器后写入收藏）
      */
     private fun showPopupMenu(e: MouseEvent) {
         val path = getPathForLocation(e.x, e.y) ?: return
@@ -1202,6 +1213,29 @@ class BookmarksTree(
             ?: FavoriteScope.PROJECT
         // 外来共享集合上下文（订阅集合节点之下）：只读，隐藏分组 CRUD（写操作只对自己的集合开放）
         val foreignSharedContext = ancestorSharedCollection(path)?.mine == false
+
+        // ////////////////  添加目录…：作用域根/列表分组节点（仅项目/全局两条线）右键入口  start  //
+        val directoryAddScope = when (val clicked = clickedUserObject) {
+            is ScopeNode -> clicked.scope
+            is BookmarkListNode -> clicked.scope
+            else -> null
+        }?.takeIf { it == FavoriteScope.PROJECT || it == FavoriteScope.GLOBAL }
+        if (directoryAddScope != null) {
+            // 列表/分组节点=加入该分组自身；作用域根=listName 为空（按现有固定作用域写入逻辑取目标分组）
+            val targetListName = (clickedUserObject as? BookmarkListNode)?.info?.name
+            group.add(object : AnAction(
+                "添加目录…",
+                "弹出目录选择器（仅可选目录），把选定目录加入「${directoryAddScope.label}」" +
+                    (targetListName?.let { "的「$it」" } ?: ""),
+                null
+            ) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    interactions.addDirectoryTo(directoryAddScope, targetListName)
+                }
+            })
+            group.add(Separator.getInstance())
+        }
+        // ////////////////  添加目录…  end  ///////////////////////////////////////////
 
         if (selectedBookmarks.isNotEmpty()) {
             group.add(object : AnAction("跳转", "跳转到收藏位置", null) {

@@ -1,7 +1,9 @@
 package com.aogg.favorites.ui
 
 import com.aogg.favorites.helper.BookmarkRefreshHelper
+import com.aogg.favorites.action.AddActionSupport
 import com.aogg.favorites.model.Bookmark
+import com.aogg.favorites.model.BookmarkType
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.model.FavoritesTransferService
@@ -18,10 +20,13 @@ import com.intellij.ide.DataManager
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.InputValidator
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.openapi.wm.ToolWindowManager
@@ -31,6 +36,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.content.ContentFactory
 import java.awt.BorderLayout
 import java.awt.FlowLayout
+import java.util.UUID
 import javax.swing.JComboBox
 import javax.swing.JPanel
 import javax.swing.event.DocumentEvent
@@ -155,6 +161,11 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
 
             override fun unshareOwnSharedCollection(collectionId: String) {
                 unshareOwnSharedCollectionWithConfirm(collectionId)
+            }
+
+            // 添加目录（右键作用域根/列表分组节点，项目/全局两条线）
+            override fun addDirectoryTo(scope: FavoriteScope, listName: String?) {
+                addDirectoryToFavorites(scope, listName)
             }
         })
 
@@ -439,6 +450,89 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         // ////////////////  逻辑后  end  //////////////////////////////////////////////
 
         afterDataChanged()
+    }
+
+    // ==================== 添加目录（右键作用域根/列表分组节点） ====================
+
+    /**
+     * 右键「添加目录…」：弹 IntelliJ 平台标准目录选择器（仅可选目录），把选定目录作为文件夹收藏写入。
+     * 写入逻辑与现有「添加文件/文件夹收藏」保持一致：项目作用域存项目根相对路径、
+     * 全局作用域存绝对路径，按目标列表归档（[AddActionSupport.storagePathFor]）。
+     *
+     * @param scope 目标作用域（仅项目/全局两条线开放入口）
+     * @param listName 目标列表名（列表/分组节点=该分组自身）；null=作用域根触发，
+     *                 按现有固定作用域写入逻辑取该作用域上次使用的分组（无记忆/已删除回退默认列表）
+     */
+    private fun addDirectoryToFavorites(scope: FavoriteScope, listName: String?) {
+        // ////////////////  准备数据：目标列表（作用域根=该作用域上次分组，无记忆回退默认列表）  start
+        val targetList = listName ?: AddActionSupport.resolveTargetGroup(project, scope)
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑一：弹平台目录选择器（仅可选目录）  start  ///////////////
+        val descriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor()
+            .withTitle("选择要收藏的目录")
+            .withDescription("将选择的目录加入「${scope.label} / $targetList」")
+        // 初始目录：项目作用域定位到项目根；全局作用域无默认定位（收藏多为项目外目录）
+        val toSelect = if (scope == FavoriteScope.PROJECT) {
+            project.basePath?.let { LocalFileSystem.getInstance().findFileByPath(it) }
+        } else {
+            null
+        }
+        val chosen = FileChooser.chooseFile(descriptor, project, toSelect) ?: return
+        // ////////////////  核心逻辑一  end  ///////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：换算存储路径（项目作用域存相对路径）  start  ///////////
+        val location = AddActionSupport.locationOf(project, chosen, -1)
+        val storagePath = AddActionSupport.storagePathFor(scope, location)
+        if (storagePath == null) {
+            Messages.showInfoMessage(
+                project,
+                "所选目录在项目目录之外，无法加入「${scope.label}」；项目外目录可加入「全局收藏」。",
+                "添加目录失败"
+            )
+            return
+        }
+        // ////////////////  核心逻辑二  end  ///////////////////////////////////////////
+
+        // ////////////////  校验参数：目标列表内同路径同类型已收藏时提示，不重复添加  start  ////
+        val manager = managerFor(scope)
+        val duplicated = manager.getBookmarksByList(targetList).any {
+            it.type == location.type && it.filePath == storagePath && it.lineNumber == location.lineNumber
+        }
+        if (duplicated) {
+            Messages.showInfoMessage(
+                project,
+                "目录「${chosen.name}」已收藏在「${scope.label} / ${manager.fullPath(targetList)}」中，无需重复添加。",
+                "添加目录"
+            )
+            return
+        }
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑三：构造文件夹收藏写入（与现有添加收藏写入一致）  start  ///
+        val added = manager.addBookmark(
+            Bookmark(
+                id = UUID.randomUUID().toString(),
+                type = BookmarkType.FOLDER,
+                filePath = storagePath,
+                lineNumber = -1,
+                mnemonic = null,
+                description = null,
+                listName = targetList
+            )
+        )
+        // ////////////////  核心逻辑三  end  ///////////////////////////////////////////
+
+        // ////////////////  逻辑后：结果通知与刷新（工具窗口树 + gutter）  start  ///////////
+        if (added) {
+            Messages.showInfoMessage(
+                project,
+                "已将目录「${chosen.name}」加入「${scope.label} / ${manager.fullPath(targetList)}」",
+                "添加目录成功"
+            )
+            afterDataChanged()
+        }
+        // ////////////////  逻辑后  end  ///////////////////////////////////////////////
     }
 
     // ==================== 列表操作（按作用域路由） ====================
