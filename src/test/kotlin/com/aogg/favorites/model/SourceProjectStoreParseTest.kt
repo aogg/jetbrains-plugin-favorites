@@ -1,8 +1,10 @@
 package com.aogg.favorites.model
 
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -14,7 +16,10 @@ import java.io.File
  * 公开的 [SourceProjectStore.collectionsFor] / [SourceProjectStore.countBookmarks]
  * （两者均完整经过私有的「JDOM load → 定位 FavoritesBookmarks 组件 → XmlSerializer 反序列化
  * State → readFromState → 相对路径换算绝对路径」解析链，无需开放产品可见性）：
- * - 未安装 mock Application 时 ProjectManager.getInstanceIfCreated() 返回 null，
+ * - mock Application 由 [SharedStoreTestSupport.installMockApplication] 提供（2023.3 的
+ *   ProjectManager.getInstanceIfCreated() 内部为 ApplicationManager.getApplication()
+ *   .getServiceIfCreated(...)，无 Application 时直接 NPE，不能裸跑）；
+ *   mock 下 getServiceIfCreated(ProjectManager) 默认返回 null，
  *   自然落入「未打开 → 磁盘解析」分支，磁盘夹具由 SharedStoreTestSupport.writeFavoritesXml
  *   按平台持久化格式生成，保证夹具真实可信；
  * - 覆盖：列表/收藏/mnemonicBookmarks 写盘→解析往返、相对路径→来源根下绝对路径换算、
@@ -27,6 +32,18 @@ class SourceProjectStoreParseTest {
     /** 每个测试独立的临时目录（JUnit5 实例级 @TempDir） */
     @TempDir
     lateinit var tempDir: File
+
+    @BeforeEach
+    fun setUp() {
+        // 安装 mock Application：让 ProjectManager.getInstanceIfCreated() 返回 null
+        // （mock 的 getServiceIfCreated 默认返回 null）而非因无 Application 抛 NPE
+        SharedStoreTestSupport.installMockApplication()
+    }
+
+    @AfterEach
+    fun tearDown() {
+        SharedStoreTestSupport.uninstallMockApplication()
+    }
 
     /**
      * 在临时目录下造一个来源项目根目录

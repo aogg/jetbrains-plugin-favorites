@@ -329,29 +329,43 @@ class SharedBookmarkManagerTest {
     }
 
     @Test
-    fun `legacy foreign collections should aggregate while source slices should not`() {
-        // ////////////////  准备数据：旧订阅外来集合 + 配置来源项目并存  start  ///////////
+    fun `legacy foreign collections should aggregate until source config replaces them`() {
+        // ////////////////  准备数据：1.7.0 旧订阅遗留集合 + 自己收藏  start  //////////////
         val foreign = store.collectionOf(foreignProject)
         foreign.core.addBookmark(Bookmark("F1", BookmarkType.LINE, "/projB/src/X.php", 1, mnemonic = 'C'))
         store.subscribe(project, foreign.id)
+        manager.addBookmark(Bookmark("B1", BookmarkType.LINE, "/projA/src/A.php", 3, mnemonic = 'A'))
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：迁移前聚合读含自己与旧订阅遗留、覆盖外来判定  start  ///////
+        // 注意：此阶段不能触发任何来源项目读取（configuredSourceProjects 首读即把 refs 迁移清空），
+        // getAllBookmarks/isForeignBookmark 均只走 visibleCollections/collectionOfBookmark，安全
+        assertEquals(
+            listOf("B1", "F1"),
+            manager.getAllBookmarks().map { it.id },
+            "迁移前聚合读应含自己与旧订阅遗留集合"
+        )
+        assertTrue(manager.isForeignBookmark("F1"), "迁移前旧订阅遗留收藏应判定为外来")
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：保存来源项目配置（1.7.1 模型整体覆盖）  start  ///////
+        // setConfiguredSourceProjects 会清空旧订阅 refs（保存新配置即替代旧订阅模型）
         val sourceRoot = newSourceProject(
             "srcMix",
             listOf(Bookmark("SB", BookmarkType.LINE, "src/S.php", 2, mnemonic = 'B'))
         )
         store.setConfiguredSourceProjects(project, listOf(sourceRoot.absolutePath))
-        manager.addBookmark(Bookmark("B1", BookmarkType.LINE, "/projA/src/A.php", 3, mnemonic = 'A'))
-        // ////////////////  准备数据  end  /////////////////////////////////////////////
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
 
-        // ////////////////  返回：聚合读含自己+旧订阅遗留、不含来源切片；
-        //                    单点查找与外来判定两者都覆盖  start  //////////////////////
+        // ////////////////  返回：聚合读只含自己；来源切片仅单点查找/外来判定可见  start  ///
         assertEquals(
-            listOf("B1", "F1"),
+            listOf("B1"),
             manager.getAllBookmarks().map { it.id },
-            "聚合读应含自己与旧订阅遗留集合、不含来源切片"
+            "配置来源项目后聚合读只含自己（旧订阅 refs 已清空、来源切片不参与聚合）"
         )
         assertNotNull(manager.getBookmark("SB"), "来源切片单点查找应可见")
-        assertTrue(manager.isForeignBookmark("F1"), "旧订阅遗留收藏应判定为外来")
         assertTrue(manager.isForeignBookmark("SB"), "来源切片收藏应判定为外来")
+        assertFalse(manager.isForeignBookmark("F1"), "被来源模型替代后的旧订阅收藏不再判定为外来")
         // ////////////////  返回  end  /////////////////////////////////////////////////
     }
 
