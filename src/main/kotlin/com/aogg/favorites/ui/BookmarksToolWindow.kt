@@ -27,6 +27,8 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.InputValidator
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.newvfs.RefreshQueue
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.openapi.wm.ToolWindowManager
@@ -36,6 +38,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.content.ContentFactory
 import java.awt.BorderLayout
 import java.awt.FlowLayout
+import java.io.File
 import java.util.UUID
 import javax.swing.JComboBox
 import javax.swing.JPanel
@@ -45,9 +48,10 @@ import javax.swing.event.DocumentListener
 /**
  * 收藏工具窗口
  * 提供统一的收藏管理界面（1.3.0 PhpStorm 风格树 + 1.2.0 双作用域 + 1.4.0 规则匹配 + 1.7.0 共享收藏）：
- * - 顶部：SearchTextField 实时过滤（作用域/描述/文件名/路径/列表名/规则名/条目文本）+ 排序方式下拉（按列表记忆持久化，各作用域独立）
+ * - 顶部：SearchTextField 实时过滤（作用域/别名/文件名/路径/列表名/规则名/条目文本）+ 排序方式下拉（按列表记忆持久化，各作用域独立）
  * - 中部：ToolbarDecorator + 树（作用域→[共享收藏按集合]→列表→文件系统风格树：虚拟目录链/文件/行收藏/文件夹懒加载 + 规则匹配根节点）
- * - 工具栏：添加收藏 / 编辑描述 / 删除 / 添加助记符 / 导入原生书签 / 配置共享项目 / 全部展开 / 全部折叠 / 收藏设置 / 新建规则 / 刷新规则
+ * - 工具栏：添加收藏 / 重命名别名 / 删除 / 添加助记符 / 导入原生书签 / 配置共享项目 / 全部展开 / 全部折叠 /
+ *   刷新（1.7.2：刷新收藏树与文件夹内容）/ 收藏设置 / 新建规则 / 刷新规则
  * - 打开工具窗口时后台自动全量刷新一次规则（不阻塞 UI）
  */
 class BookmarksToolWindowFactory : ToolWindowFactory {
@@ -91,10 +95,18 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     private val sortComboBox = JComboBox<SortItem>()
     private var updatingSortComboBox = false
 
+    /** 面板日志（JComponent 已有一个不可访问的私有 log 字段，故用独立名称避免遮蔽） */
+    private val panelLog = Logger.getInstance(BookmarksToolWindowPanel::class.java)
+
     init {
         bookmarksTree = BookmarksTree(project, object : BookmarksTree.Interactions {
             override fun editSelectedBookmark() {
-                editSelectedDescription()
+                renameSelectedBookmarkAlias()
+            }
+
+            override fun renameAlias(item: ScopedBookmark) {
+                // 右键「重命名别名…」：直接作用于右键点中的收藏，不依赖树当前选中项
+                renameSelectedAlias(item)
             }
 
             override fun deleteSelected() {
@@ -169,7 +181,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             }
         })
 
-        // 搜索过滤（按作用域/描述/文件名/路径/列表名实时过滤，命中项重建文件系统骨架）
+        // 搜索过滤（按作用域/别名/文件名/路径/列表名实时过滤，命中项重建文件系统骨架）
         searchField.addDocumentListener(object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) {
                 applyFilter()
@@ -202,13 +214,14 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
         northPanel.add(sortPanel, BorderLayout.EAST)
         add(northPanel, BorderLayout.NORTH)
 
-        // 工具栏（ToolbarDecorator 原生观感；1.4.0 新增「新建规则」「刷新规则」置于现有 extraAction 之后）
+        // 工具栏（ToolbarDecorator 原生观感；1.4.0 新增「新建规则」「刷新规则」置于现有 extraAction 之后；
+        // 1.7.2 在「全部折叠」之后新增「刷新」——刷新收藏树与文件夹内容，与只重跑规则的「刷新规则」区分）
         val decorator = ToolbarDecorator.createDecorator(bookmarksTree)
             .disableUpDownActions()
             .setAddActionName("添加收藏")
             .setAddAction { addAnonymousBookmarkFromToolWindow() }
-            .setEditActionName("编辑描述")
-            .setEditAction { editSelectedDescription() }
+            .setEditActionName("重命名别名")
+            .setEditAction { renameSelectedBookmarkAlias() }
             .setRemoveActionName("删除收藏")
             .setRemoveAction { deleteSelectedNodes() }
             .addExtraAction(AddMnemonicFromToolWindowAction())
@@ -216,6 +229,7 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             .addExtraAction(ManageSharedRefsAction())
             .addExtraAction(ExpandAllAction())
             .addExtraAction(CollapseAllAction())
+            .addExtraAction(RefreshFavoritesTreeAction())
             .addExtraAction(OpenFavoritesSettingsAction())
             .addExtraAction(CreateRuleAction())
             .addExtraAction(RefreshAllRulesAction())
@@ -258,6 +272,88 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     }
 
     /**
+     * 刷新收藏树与文件夹内容（1.7.2 工具栏「刷新」）：
+     * 1) 收集全部作用域（项目/共享/全局）收藏路径解析出的 VirtualFile（文件与目录都要，存在的才收）；
+     * 2) 平台 [RefreshQueue] 异步刷新 VFS（不在 EDT 阻塞）；
+     * 3) 回调回 EDT 调 [BookmarksTree.refreshFromDisk] 清空 VFS 兜底缓存并重建树，
+     *    展开记忆与过滤关键字由树侧现成逻辑沿用。
+     */
+    private fun refreshFavoritesFromDisk() {
+        // ////////////////  校验参数：项目已释放时不再刷新（避免访问已注销的服务/树）  start  ///
+        if (project.isDisposed) return
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  准备数据：作用域收藏 → 存在的 VirtualFile  start  /////////////
+        val files = runCatching { collectFavoriteVirtualFiles() }
+            .onFailure { panelLog.warn("收集收藏路径对应的虚拟文件失败，退化为仅重建收藏树", it) }
+            .getOrDefault(emptyList())
+        // ////////////////  准备数据  end  //////////////////////////////////////////////
+
+        // ////////////////  校验参数：无可刷新文件时直接重建树  start  ///////////////////
+        if (files.isEmpty()) {
+            bookmarksTree.refreshFromDisk(searchField.text)
+            return
+        }
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：异步刷新 VFS，回调回 EDT 重建树  start  /////////////
+        runCatching {
+            RefreshQueue.getInstance().refresh(true, true, Runnable {
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    bookmarksTree.refreshFromDisk(searchField.text)
+                }
+            }, files)
+        }.onFailure { e ->
+            panelLog.warn("刷新收藏路径的 VFS 失败，退化为直接重建收藏树", e)
+            bookmarksTree.refreshFromDisk(searchField.text)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 收集全部作用域收藏路径解析出的虚拟文件（按 VFS 路径去重；文件与目录都要，存在才收）
+     *
+     * @return 虚拟文件列表（可能为空）
+     */
+    private fun collectFavoriteVirtualFiles(): List<VirtualFile> {
+        // ////////////////  核心逻辑：逐作用域逐收藏解析，按 path 去重  start  ///////////
+        val resolved = LinkedHashMap<String, VirtualFile>()
+        for (scope in FavoriteScope.entries) {
+            val bookmarks = runCatching { managerFor(scope).getAllBookmarks() }
+                .onFailure { panelLog.warn("读取「${scope.label}」收藏列表失败（跳过该作用域）", it) }
+                .getOrDefault(emptyList())
+            for (bookmark in bookmarks) {
+                val file = resolveFavoriteVirtualFile(bookmark.filePath) ?: continue
+                resolved[file.path] = file
+            }
+        }
+        return resolved.values.toList()
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 收藏路径 → 存在的虚拟文件（绝对路径直用；项目相对路径拼项目根；正斜杠规范后查 VFS 缓存）
+     *
+     * @param path 收藏路径（项目作用域相对 / 共享与全局作用域绝对）
+     * @return 虚拟文件；路径为空、无项目根或 VFS 未收录时返回 null
+     */
+    private fun resolveFavoriteVirtualFile(path: String): VirtualFile? {
+        // ////////////////  校验参数  start  ///////////////////////////////////////////
+        if (path.isBlank()) return null
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：换算绝对路径后查 VFS 缓存  start  ///////////////////
+        val absolutePath = when {
+            File(path).isAbsolute -> path
+            else -> project.basePath?.let { File(it, path).absolutePath } ?: return null
+        }
+        return LocalFileSystem.getInstance().findFileByPath(absolutePath.replace('\\', '/'))
+            ?.takeIf { it.isValid }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
      * 收藏数据发生变化：刷新树与 gutter
      */
     private fun afterDataChanged() {
@@ -293,14 +389,29 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
 
     // ==================== 收藏操作（按作用域路由） ====================
 
-    private fun editSelectedDescription() {
-        val selected = bookmarksTree.getSelectedBookmarks().singleOrNull()
-        if (selected == null) {
-            Messages.showInfoMessage(project, "请先在树中选中一个收藏项", "编辑收藏描述")
+    /**
+     * 重命名别名（无参入口）：工具栏按钮、F2 快捷键与无参交互回调共用，
+     * 目标=JTree 当前选中项（未选中/多选时提示先选中）
+     */
+    private fun renameSelectedBookmarkAlias() {
+        renameSelectedAlias(bookmarksTree.getSelectedBookmarks().singleOrNull())
+    }
+
+    /**
+     * 重命名别名（1.7.2：原「编辑描述」改名，行为仍是写收藏的 description 字段）：
+     * 别名非空时树中主文本显示别名（文件/文件夹收藏）/ 灰色说明体现别名（行收藏），
+     * 留空=清除别名、恢复默认名称显示；编辑成功后经 [afterDataChanged] 重建树使别名立即可见。
+     *
+     * @param item 目标收藏（右键点中的收藏 / 树当前选中收藏；null=无目标，提示先选中）
+     */
+    private fun renameSelectedAlias(item: ScopedBookmark?) {
+        // ////////////////  校验参数：必须有一个目标收藏  start  ////////////////////////
+        if (item == null) {
+            Messages.showInfoMessage(project, "请先在树中选中一个收藏项", "重命名别名")
             return
         }
-        // 外来共享集合只读（1.7.0）：不能编辑
-        if (isForeignSharedBookmark(selected)) {
+        // 外来共享集合只读（1.7.0/1.7.1）：不能编辑
+        if (isForeignSharedBookmark(item)) {
             Messages.showInfoMessage(
                 project,
                 "该收藏来自共享配置的来源项目（只读镜像），只能在其来源项目中修改。",
@@ -308,18 +419,25 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
             )
             return
         }
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：弹输入框（留空=清除别名）  start  //////////////////
         val input = Messages.showInputDialog(
             project,
-            "请输入收藏描述：",
-            "编辑收藏描述",
+            "请输入别名（留空恢复默认显示）：",
+            "重命名别名",
             Messages.getInformationIcon(),
-            selected.bookmark.description ?: "",
+            item.bookmark.description ?: "",
             null
         )
         // 取消输入
         if (input == null) return
-        managerFor(selected.scope).updateBookmarkDescription(selected.bookmark.id, input.trim().ifEmpty { null })
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // ////////////////  逻辑后：写回别名并刷新树/gutter（别名立即在树中可见）  start  ///
+        managerFor(item.scope).updateBookmarkDescription(item.bookmark.id, input.trim().ifEmpty { null })
         afterDataChanged()
+        // ////////////////  逻辑后  end  //////////////////////////////////////////////
     }
 
     private fun deleteSelectedNodes() {
@@ -827,6 +945,18 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     private inner class CollapseAllAction : AnAction("全部折叠", "折叠所有列表", AllIcons.Actions.Collapseall) {
         override fun actionPerformed(e: AnActionEvent) {
             bookmarksTree.collapseAllRows()
+        }
+    }
+
+    /**
+     * 刷新收藏树按钮（1.7.2，紧跟「全部折叠」之后）：
+     * 先异步刷新各收藏路径的 VFS，再重建收藏树，让磁盘上新文件/新目录显示出来
+     * （与只重跑规则的「刷新规则」区分开）
+     */
+    private inner class RefreshFavoritesTreeAction :
+        AnAction("刷新", "刷新收藏树与文件夹内容，让磁盘上新文件/新目录显示出来", AllIcons.Actions.Refresh) {
+        override fun actionPerformed(e: AnActionEvent) {
+            refreshFavoritesFromDisk()
         }
     }
 

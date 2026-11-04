@@ -29,9 +29,10 @@ import java.util.*
  * - 项目视图多选批量：只弹一次选择，全部加入同一「作用域+分组」。
  *
  * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
- * 固定作用域入口（如原生 ToggleBookmark 委托、Ctrl+点击行号区手势）不弹作用域选择，
+ * **键盘快捷键入口**（如原生 ToggleBookmark 的 F11 键位）与 **Ctrl+点击行号区手势**不弹作用域选择，
  * 直接按指定作用域执行；1.5.x 起目标分组取「该作用域上次使用的分组」，
- * 无记忆/记忆已删除则回退默认「收藏」；右键菜单等原入口行为不变。
+ * 无记忆/记忆已删除则回退默认「收藏」；**菜单/工具栏/右键菜单/查找操作等**原入口行为不变
+ * （1.7.2 起弹「作用域+分组」选择，见 [com.aogg.favorites.nativebookmarks.isKeyboardShortcutInvocation]）。
  */
 class AddAnonymousBookmarkAction : AnAction("添加收藏", "添加收藏", null), ScopedAddAction {
 

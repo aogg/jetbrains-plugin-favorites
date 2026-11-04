@@ -4,6 +4,7 @@ import com.aogg.favorites.action.ScopedAddAction
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.settings.FavoritesSettings
 import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.impl.ActionConfigurationCustomizer
@@ -16,6 +17,8 @@ import com.intellij.openapi.components.StoragePathMacros
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.util.xmlb.XmlSerializerUtil
+import java.awt.event.InputEvent
+import java.awt.event.KeyEvent
 
 // =====================================================================================
 // 应用级持久化状态：已替换/已隐藏的原生动作 id 集合
@@ -99,13 +102,48 @@ class NativeBookmarkActionService {
 // =====================================================================================
 
 /**
+ * 判断本次动作调用是否来自键盘快捷键（1.7.2 原生书签委托动作区分来源）
+ *
+ * 背景：原生书签动作被本插件接管后，同一个动作会从多种入口触发，语义要求不同：
+ * - **键盘快捷键**（F11 / Ctrl+F11 等）：沿用原生"快捷键直达"约定——固定当前项目作用域、
+ *   写入该作用域上次使用的分组，全程不弹「作用域+分组」选择；
+ * - **菜单 / 工具栏 / 右键菜单 / 查找操作等**：与插件其它添加入口保持一致——弹
+ *   [com.aogg.favorites.ui.ScopeGroupChooserPopup] 让用户选择「项目/共享/全局及各自列表」。
+ *
+ * 平台在 [AnActionEvent] 中同时提供 place 与 inputEvent：键盘快捷键调用通常携带 [KeyEvent]
+ * （部分平台版本/入口会同时给出 [ActionPlaces.KEYBOARD_SHORTCUT] 位置），菜单点击则位置为
+ * POPUP / MAIN_MENU / TOOLBAR 等且没有 [KeyEvent]。两者任一命中即按快捷键处理，
+ * 以兼容 233 ~ 262 各版本对 place 取值的差异（IDE 升级后判定不会失灵）。
+ *
+ * @param place 动作触发位置（[AnActionEvent.getPlace]，可能为 null）
+ * @param inputEvent 触发该动作的输入事件（[AnActionEvent.getInputEvent]，可能为 null）
+ * @return true=键盘快捷键调用（固定作用域、不弹选择）；false=菜单/工具栏等普通调用（弹选择）
+ */
+internal fun isKeyboardShortcutInvocation(place: String?, inputEvent: InputEvent?): Boolean {
+    // ////////////////  核心逻辑：输入事件与触发位置两个判据分别计算  start  ///////////
+    val byInputEvent = inputEvent is KeyEvent
+    val byPlace = place == ActionPlaces.KEYBOARD_SHORTCUT
+    // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+    // ////////////////  返回：任一命中即视为键盘快捷键调用  start  ////////////////
+    return byInputEvent || byPlace
+    // ////////////////  返回  end  ////////////////////////////////////////////////
+}
+
+/**
  * 原生动作的委托动作：保留原生动作 id（用户键位映射不变），执行时转发到我们的动作
+ *
+ * 1.7.2 起按调用来源区分执行方式（同一原生动作会出现在快捷键/菜单/工具栏等多个位置）：
+ * - 键盘快捷键（[isKeyboardShortcutInvocation]）：[fixedScope] 非空时按固定作用域直接执行
+ *   （[ScopedAddAction.performWithFixedScope]，不弹「作用域+分组」选择，写入该作用域上次分组）；
+ * - 菜单 / 工具栏 / 右键菜单 / 查找操作等其它来源：走普通 [AnAction.actionPerformed]，
+ *   即弹「作用域+分组（项目/共享/全局及各自列表）」选择，不再无条件固定为当前项目作用域。
  *
  * @param nativeActionId 被接管的原生动作 id（仅用于展示文案兜底）
  * @param favoritesActionId 转发目标的 Favorites 动作 id
  * @param text 菜单/键位编辑器中的显示文案
- * @param fixedScope 非空时按固定作用域直接执行（转发目标需实现 [ScopedAddAction]），
- *   不弹作用域二选一；原生快捷键接管路径固定为当前项目作用域。null 时保持原转发行为
+ * @param fixedScope 非空时“键盘快捷键调用”按该固定作用域执行（转发目标需实现 [ScopedAddAction]）；
+ *   菜单/工具栏等非快捷键调用不受影响，照常弹选择
  */
 class DelegateToFavoritesAction(
     private val nativeActionId: String,
@@ -124,8 +162,9 @@ class DelegateToFavoritesAction(
             val actionManager = ActionManager.getInstance()
             val target = actionManager.getAction(favoritesActionId) ?: return
 
-            // 固定作用域路径：不弹作用域选择，直接按当前项目作用域执行（添加类动作接管专用）
-            if (fixedScope != null && target is ScopedAddAction) {
+            // ////////////////  核心逻辑：仅键盘快捷键路径固定作用域，其余来源走普通转发  start
+            if (fixedScope != null && target is ScopedAddAction && isKeyboardShortcutInvocation(e.place, e.inputEvent)) {
+                // 键盘快捷键（F11/Ctrl+F11 等）：不弹作用域选择，直接按当前项目作用域执行
                 val scopedEvent = AnActionEvent.createFromDataContext(
                     "FavoritesNativeAction",
                     null,
@@ -135,13 +174,14 @@ class DelegateToFavoritesAction(
                 return
             }
 
-            // 普通转发路径：行为与原 Favorites 动作一致（含作用域二选一）
+            // 菜单/工具栏/右键菜单/查找操作等：行为与 Favorites 动作原入口一致（弹「作用域+分组」选择）
             val event = AnActionEvent.createFromDataContext(
                 "FavoritesNativeAction",
                 null,
                 e.dataContext
             )
             target.actionPerformed(event)
+            // ////////////////  核心逻辑  end  ////////////////////////////////////////
         }.onFailure { log.warn("委托动作执行失败：$nativeActionId", it) }
     }
 
@@ -188,7 +228,8 @@ object NativeBookmarkActionIntegration {
     /**
      * 需要接管（replaceAction）的原生动作 id → 转发目标与执行方式
      * 语义（接管为无条件，与设置开关无关）：
-     * ToggleBookmark→匿名收藏（固定当前项目作用域）；ToggleBookmarkWithMnemonic→助记符收藏（固定当前项目作用域）；
+     * ToggleBookmark→匿名收藏、ToggleBookmarkWithMnemonic→助记符收藏（添加类动作带 fixedScope）：
+     * 仅键盘快捷键调用按固定当前项目作用域执行、不弹选择；菜单/工具栏/右键菜单等来源弹「作用域+分组」选择；
      * ShowBookmarks→收藏弹出列表；ActivateBookmarksToolWindow→收藏工具窗口开关
      */
     private val REPLACED_BY_FAVORITES_ACTION: Map<String, TakeoverSpec> = linkedMapOf(
@@ -202,7 +243,8 @@ object NativeBookmarkActionIntegration {
      * 接管规格
      *
      * @param favoritesActionId 转发目标的 Favorites 动作 id
-     * @param fixedScope 非空时按固定作用域执行（不弹作用域二选一；原生快捷键路径固定为当前项目）
+     * @param fixedScope 非空时“键盘快捷键调用”按固定作用域执行（不弹「作用域+分组」选择）；
+     *   菜单/工具栏等非快捷键来源仍走普通转发（弹选择）
      */
     private class TakeoverSpec(val favoritesActionId: String, val fixedScope: FavoriteScope? = null)
 

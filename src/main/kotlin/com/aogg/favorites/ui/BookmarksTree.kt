@@ -14,10 +14,18 @@ import com.aogg.favorites.model.SharedCollectionManagerView
 import com.aogg.favorites.model.SourceProjectStore
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
+import com.intellij.ide.DataManager
+import com.intellij.ide.DeleteProvider
+import com.intellij.ide.IdeView
+import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
+import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -26,6 +34,7 @@ import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileChooser.actions.VirtualFileDeleteProvider
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Disposer
@@ -35,6 +44,12 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileEvent
 import com.intellij.openapi.vfs.VirtualFileListener
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.newvfs.RefreshQueue
+import com.intellij.pom.Navigatable
+import com.intellij.psi.PsiDirectory
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiFile
+import com.intellij.psi.PsiManager
 import com.intellij.ui.TreeUIHelper
 import com.intellij.ui.treeStructure.Tree
 import java.awt.event.ActionEvent
@@ -97,6 +112,9 @@ data class BookmarkListNode(
  * @param fromFs 是否来自真实文件系统展开（真实目录=true，展开时继续读文件系统）
  * @param missing 文件夹收藏目标不存在/不可读（缺失态：叶子节点+红叉图标）
  * @param collectionId 共享作用域下的集合 id（跨集合同名列表的骨架/展开记忆键隔离；其它作用域为 ""）
+ *
+ * 1.7.2 起别名（收藏描述）在树中立即可见：文件夹收藏节点主文本 = 别名（非空白时）否则目录名；
+ * 未收藏的真实目录（无 bookmark）不显示别名。
  */
 class DirNode(
     val scope: FavoriteScope,
@@ -118,7 +136,17 @@ class DirNode(
     val fsBacked: Boolean
         get() = bookmark != null || fromFs
 
-    override fun toString(): String = name
+    /**
+     * 显示名（渲染器主文本）：有别名（收藏描述非空白）时用别名，否则用目录名；
+     * 未收藏真实目录（无 bookmark）恒为目录名
+     */
+    val displayName: String
+        get() = bookmark?.description?.takeIf { it.isNotBlank() } ?: name
+
+    /**
+     * 速度搜索匹配文本：别名与真实目录名都参与匹配（设置别名后仍可按目录名搜到）
+     */
+    override fun toString(): String = if (displayName == name) displayName else "$displayName $name"
 }
 
 /**
@@ -132,6 +160,9 @@ class DirNode(
  * @param name 文件名（显示主文本）
  * @param fileBookmark 文件收藏（仅承载行收藏时为 null）
  * @param lineBookmarks 挂在该文件下的行收藏（保持列表排序出现顺序）
+ *
+ * 1.7.2 起别名（收藏描述）在树中立即可见：文件收藏节点主文本 = 别名（非空白时）否则文件名；
+ * 仅承载行收藏的文件容器（无文件收藏）不显示别名。
  */
 class FileNode(
     val scope: FavoriteScope,
@@ -141,12 +172,24 @@ class FileNode(
     val fileBookmark: Bookmark?,
     val lineBookmarks: List<Bookmark>
 ) {
+    /**
+     * 显示名（渲染器主文本）：有别名（文件收藏的描述非空白）时用别名，否则用文件名
+     */
+    val displayName: String
+        get() = fileBookmark?.description?.takeIf { it.isNotBlank() } ?: name
+
+    /**
+     * 速度搜索匹配文本：助记符前缀 + 别名/文件名；设置别名后同时保留真实文件名参与匹配
+     */
     override fun toString(): String = buildString {
         val mnemonic = fileBookmark?.mnemonic
         if (mnemonic != null) {
             append(BookmarkIconHelper.getMnemonicText(mnemonic)).append(' ')
         }
-        append(name)
+        append(displayName)
+        if (displayName != name) {
+            append(' ').append(name)
+        }
     }
 }
 
@@ -167,9 +210,19 @@ class LineEntryNode(
     var contentText: String?
 ) {
     /**
-     * 灰色说明文本：行内容优先（超长已在构建时截断），读取失败回退收藏描述
+     * 灰色说明文本（1.7.2 起体现别名）：
+     * - 行内容优先；有别名时格式为「别名 · 行内容」（不能把行内容挤没）；
+     * - 行内容读取失败/空白行时回退收藏别名（无别名则为空串）
      */
-    fun grayText(): String = contentText ?: bookmark.description?.takeIf { it.isNotBlank() } ?: ""
+    fun grayText(): String {
+        val alias = bookmark.description?.takeIf { it.isNotBlank() }
+        val content = contentText
+        return when {
+            content.isNullOrEmpty() -> alias ?: ""
+            alias == null -> content
+            else -> "$alias · $content"
+        }
+    }
 
     override fun toString(): String = buildString {
         val mnemonic = bookmark.mnemonic
@@ -371,15 +424,23 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  *
  * 交互：
  * - Enter / 双击 = 跳转（行→编辑器定位；文件→打开；文件夹→Project 视图选中；未收藏真实节点同样可跳转）
- * - F2 = 编辑描述、Del = 删除（通过 [Interactions] 回调到面板实现；未收藏真实节点收藏类操作不可用）
+ * - F2 = 重命名别名、Del = 删除（通过 [Interactions] 回调到面板实现；未收藏真实节点收藏类操作不可用）
  * - 右键菜单：作用域根/列表分组节点（项目/全局）首项=添加目录…（弹平台目录选择器写入收藏）；
- *   跳转/编辑描述/设置助记符/移动到列表(按作用域分组、按分组层级嵌套)/分组CRUD
+ *   跳转/重命名别名…/设置助记符/移动到列表(按作用域分组、按分组层级嵌套)/分组CRUD
  *   （分组节点=新建子分组；选中默认列表或作用域节点=新建顶级列表；删除分组级联连删子分组）/删除收藏 + 规则匹配菜单
+ *   + 文件夹收藏/真实目录「刷新此目录」+ 收藏文件/文件夹「项目视图操作」子菜单（1.7.2）
+ * - 「项目视图操作」子菜单（1.7.2）：直接取平台 ProjectViewPopupMenu 动作组子项（平台动作实例，不复制实现），
+ *   通过 ActionPopupMenu.setDataContext 注入与右键节点一致的 DataContext（项目/虚拟文件/PSI 元素/PSI 文件/
+ *   NAVIGATABLE/IDE_VIEW/上下文组件/目标删除器），未知键回退基础上下文；排除原生书签组与插件自己的「收藏」组；
+ *   平台动作组取不到时降级为不显示该子菜单（仅记日志，不影响其它菜单项）
  * - 选中行收藏时预览打开文件但不抢焦点（openFile(file, false)）
  * - 装 TreeSpeedSearch（TreeUIHelper.installTreeSpeedSearch），各节点 toString 均参与匹配
+ *   （1.7.2 起别名包含在 FileNode/DirNode/LineEntryNode 的 toString 中，可按别名搜索）
  * - 搜索过滤时作用域名/分组名/文件名/路径/描述/规则名/条目文本均参与匹配，
  *   分组名命中放行该分组整棵子树，过滤后虚拟目录链按命中项重建
  * - 刷新（含过滤）保留已展开目录的展开状态；作用域/分组层级/规则根/规则层级始终展开
+ * - 从磁盘刷新（1.7.2）：[refreshFromDisk] 清空 VFS 兜底缓存后重建树（工具栏「刷新」），
+ *   目录节点右键「刷新此目录」异步刷新该目录 VFS 后原位重置并重新懒加载子项（缺失态退化为整树重建）
  */
 class BookmarksTree(
     private val project: Project,
@@ -390,7 +451,19 @@ class BookmarksTree(
      * 面板侧交互回调（带作用域：列表操作作用于所在作用域；规则操作回调到面板弹对话框/驱动管理器）
      */
     interface Interactions {
+
+        /**
+         * 重命名别名（无参入口）：工具栏按钮与 F2 快捷键走这里，按 JTree 当前选中项执行
+         */
         fun editSelectedBookmark()
+
+        /**
+         * 重命名别名（带参入口，1.7.2 新增）：右键菜单「重命名别名…」走这里，
+         * 直接作用于右键点中的那个收藏节点，不依赖 JTree 当前选中项（避免选中态丢失时提示「请先选中收藏项」）
+         *
+         * @param item 右键点中的收藏（作用域 + 收藏项）
+         */
+        fun renameAlias(item: ScopedBookmark)
         fun deleteSelected()
         fun setMnemonicForSelected()
         fun moveSelectedTo(scope: FavoriteScope, listName: String)
@@ -452,6 +525,43 @@ class BookmarksTree(
 
         /** 全部展开时的行数安全上限（防止在超大真实目录树上无限懒加载） */
         private const val MAX_EXPAND_ROWS = 10000
+
+        /** 平台项目视图右键菜单动作组 id（1.7.2 收藏树右键「项目视图操作」子菜单的动作来源） */
+        private const val PROJECT_VIEW_POPUP_MENU_ID = "ProjectViewPopupMenu"
+
+        /** 「项目视图操作」子菜单标题 */
+        private const val PROJECT_VIEW_ACTIONS_TITLE = "项目视图操作"
+
+        /** 本插件自己的「收藏」右键组 id（平台项目视图菜单里也有，子菜单中需排除避免自我嵌套） */
+        private const val FAVORITES_ACTION_GROUP_ID = "Favorites.Group"
+
+        /**
+         * 平台项目视图菜单中需排除的动作组 id（1.7.2）：
+         * - `popup@ExpandableBookmarkContextMenu`：平台项目视图右键的原生「书签」弹出组
+         *   （LangActions.xml 中 id 带 popup@ 前缀，与 [com.aogg.favorites.nativebookmarks.NativeBookmarkActionIntegration]
+         *   隐藏原生书签界面时使用的 id 保持一致；本插件已接管原生书签，子菜单中不再重复出现）；
+         * - `popup@BookmarkContextMenu`：行号区原生书签弹出组（项目视图菜单当前未引用，纳入保险）；
+         * - `Favorites.Group`：本插件自己的「收藏」组（避免子菜单自我嵌套）。
+         */
+        private val EXCLUDED_PROJECT_VIEW_ACTION_IDS = setOf(
+            "popup@ExpandableBookmarkContextMenu",
+            "popup@BookmarkContextMenu",
+            "ExpandableBookmarkContextMenu",
+            FAVORITES_ACTION_GROUP_ID
+        )
+
+        /** 原生书签组类名/文案兜底标识（ActionManager 取不到 id 时用于排除判定） */
+        private const val EXCLUDED_NATIVE_BOOKMARK_GROUP_NAME = "ExpandableBookmarkContextMenu"
+
+        /** 原生书签组显示文案兜底（中英文 IDE，均可能是平台动作组未带 text 时的兜底文案） */
+        private val EXCLUDED_PROJECT_VIEW_GROUP_TEXTS = setOf("书签", "Bookmarks")
+
+        /**
+         * IDE_VIEW 数据键名：2023.3 起该键常量位于 com.intellij.openapi.actionSystem.LangDataKeys，
+         * 键名字符串（"IDEView"）是跨版本稳定契约（DataKey.create 按名称缓存）；
+         * 这里按名称匹配，避免大版本间类包路径变化导致 NoClassDefFoundError
+         */
+        private const val DATA_ID_IDE_VIEW = "IDEView"
     }
 
     private var filterText: String = ""
@@ -464,6 +574,13 @@ class BookmarksTree(
 
     /** 已做过 VFS 同步刷新兜底的绝对路径集合（每路径只试一次，防过滤输入等高频刷新反复触盘；并发安全） */
     private val vfsRefreshTriedPaths: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * 「项目视图操作」子菜单的删除器（1.7.2）：只删除注入上下文里的右键目标
+     * （[com.intellij.openapi.fileChooser.actions.VirtualFileDeleteProvider] 按 VIRTUAL_FILE_ARRAY 删除），
+     * 绝不读取项目视图当前选区，避免误删用户之前选中的其它文件
+     */
+    private val targetDeleteProvider: DeleteProvider = VirtualFileDeleteProvider()
 
     /** 进行中的异步行内容加载请求键（缓存键#行号，防同一位置重复调度后台加载） */
     private val pendingLineLoadKeys = HashSet<String>()
@@ -523,7 +640,7 @@ class BookmarksTree(
             }
         })
 
-        // Enter=跳转 / F2=编辑描述 / Del=删除
+        // Enter=跳转 / F2=重命名别名 / Del=删除
         registerKeyStrokes()
 
         // 目录懒加载：首次展开时物化骨架子项，文件夹收藏/真实目录再合并真实文件系统子项
@@ -615,6 +732,24 @@ class BookmarksTree(
         // 裁剪行内容缓存：仅保留当前树中行收藏仍引用的文件（避免内存无限增长）
         pruneLineContentCache()
         // ////////////////  逻辑后  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 从磁盘刷新收藏树（1.7.2 工具栏「刷新」的树侧统一入口）：
+     * 先清空「VFS 未收录路径只尝试一次」缓存（[vfsRefreshTriedPaths]），再重建树——
+     * 外部新增/删除的文件与目录立即可见；展开记忆与过滤关键字沿用 [refresh] 现成逻辑
+     * （作用域/分组/规则层级始终展开，已展开目录按记忆恢复，其它现有行为不变）
+     *
+     * @param filter 过滤关键字（面板调用时传搜索框当前文本；默认沿用当前过滤词）
+     */
+    fun refreshFromDisk(filter: String = filterText) {
+        // ////////////////  核心逻辑：清空 VFS 兜底缓存（让上次未收录路径重新尝试刷新）  start
+        vfsRefreshTriedPaths.clear()
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+        // ////////////////  逻辑后：按展开记忆与过滤词重建树  start  ////////////////////
+        refresh(filter)
+        // ////////////////  逻辑后  end  //////////////////////////////////////////////
     }
 
     /**
@@ -1206,6 +1341,12 @@ class BookmarksTree(
         val group = DefaultActionGroup()
         val selectedBookmarks = getSelectedBookmarks()
         val selectedList = getSelectedList()
+        // 右键目标对应的虚拟文件（文件收藏/文件夹收藏/真实目录/未收藏真实文件；纯虚拟目录与缺失目录为 null）
+        val clickedTargetFile = resolveClickedVirtualFile(clickedUserObject)
+        // 右键目标为可展开目录节点（文件夹收藏或真实目录）时提供「刷新此目录」
+        val clickedDirNode = clickedUserObject as? DirNode
+        // 右键点中的收藏（「重命名别名…」直接作用于它，不依赖 JTree 当前选中项）
+        val clickedBookmark = bookmarkOfNode(path.lastPathComponent)
         // 列表操作作用域：优先列表节点自身 → 收藏所属列表 → 选中上下文作用域，兜底项目收藏
         val listScope = selectedList?.scope
             ?: selectedBookmarks.firstOrNull()?.scope
@@ -1243,9 +1384,11 @@ class BookmarksTree(
                     selectedBookmarks.firstOrNull()?.let { navigateToBookmark(it.bookmark) }
                 }
             })
-            group.add(object : AnAction("编辑描述", "编辑收藏的描述", null) {
+            // 重命名别名（1.7.2）：直接作用于右键点中的收藏，不依赖 JTree 当前选中项
+            group.add(object : AnAction("重命名别名…", "重命名该收藏的别名（留空恢复默认显示）", null) {
                 override fun actionPerformed(e: AnActionEvent) {
-                    interactions.editSelectedBookmark()
+                    val target = clickedBookmark ?: selectedBookmarks.firstOrNull() ?: return
+                    interactions.renameAlias(target)
                 }
             })
             group.add(object : AnAction("设置助记符", "设置或修改收藏的助记符", null) {
@@ -1267,6 +1410,21 @@ class BookmarksTree(
             }
             // ////////////////  未收藏真实/容器节点  end  /////////////////////////////////
         }
+
+        // ////////////////  刷新此目录：文件夹收藏/真实目录（1.7.2）  start  //////////////
+        val clickedDirTreeNode = path.lastPathComponent as? DefaultMutableTreeNode
+        if (clickedDirNode != null && clickedDirNode.fsBacked && clickedDirTreeNode != null) {
+            group.add(object : AnAction(
+                "刷新此目录",
+                "刷新该目录在磁盘上的内容并重新加载其子项（外部新增/删除的文件目录立即可见）",
+                null
+            ) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    refreshDirFromDisk(clickedDirTreeNode, clickedDirNode)
+                }
+            })
+        }
+        // ////////////////  刷新此目录  end  ////////////////////////////////////////////
 
         // ////////////////  分组CRUD：分组节点=新建子分组；默认列表/其它上下文=新建顶级列表  //
         // 外来共享集合上下文只读，隐藏分组 CRUD
@@ -1317,9 +1475,29 @@ class BookmarksTree(
             })
         }
 
+        // ////////////////  项目视图操作子菜单（1.7.2）：直接复用平台 ProjectViewPopupMenu  start
+        if (clickedTargetFile != null) {
+            val projectViewActions = buildProjectViewActionsSubmenu(clickedTargetFile)
+            if (projectViewActions != null) {
+                group.add(Separator.getInstance())
+                group.add(projectViewActions)
+            }
+        }
+        // ////////////////  项目视图操作子菜单  end  ////////////////////////////////////
+
+        // ////////////////  弹窗：注入与右键节点一致的 DataContext 后显示  start  ////////
         val popup = ActionManager.getInstance()
             .createActionPopupMenu("FavoritesToolWindowPopupMenu", group)
+        // 平台项目视图动作（新建/删除/重命名/复制粘贴/同步等）按该 DataContext 取目标，确保作用在右键节点上
+        if (clickedTargetFile != null) {
+            runCatching {
+                val baseContext = DataManager.getInstance().getDataContext(this)
+                val actionContext = buildTargetDataContext(clickedTargetFile, baseContext)
+                popup.setDataContext(java.util.function.Supplier { actionContext })
+            }.onFailure { log.warn("设置收藏树右键菜单 DataContext 失败（平台动作将回退默认上下文）", it) }
+        }
         popup.component.show(this, e.x, e.y)
+        // ////////////////  弹窗  end  /////////////////////////////////////////////////
     }
 
     /**
@@ -1496,6 +1674,215 @@ class BookmarksTree(
         // ////////////////  分支三  end  //////////////////////////////////////////////
     }
 
+    /**
+     * 解析右键节点对应的虚拟文件（1.7.2「项目视图操作」子菜单适用性判定）：
+     * - [FileNode]：文件收藏本体或仅承载行收藏的文件容器，按节点路径解析；
+     * - [DirNode]：仅文件夹收藏（bookmark != null）或真实目录（fromFs=true）——
+     *   纯虚拟目录（仅承载收藏路径的目录链）不参与；
+     * - [RealFileNode]：文件夹收藏展开出的真实子文件；
+     * - 其它节点类型（作用域/分组/规则/共享集合/行收藏等）不参与。
+     *
+     * @param userObject 右键节点的用户对象
+     * @return 虚拟文件；节点不适用或路径解析失败（缺失态）返回 null
+     */
+    private fun resolveClickedVirtualFile(userObject: Any?): VirtualFile? = when (userObject) {
+        is FileNode -> resolveNodePath(userObject.scope, userObject.path)?.takeIf { it.isValid }
+        is DirNode -> if (userObject.fsBacked) {
+            resolveNodePath(userObject.scope, userObject.path)?.takeIf { it.isValid && it.isDirectory }
+        } else {
+            null
+        }
+        is RealFileNode -> userObject.virtualFile.takeIf { it.isValid }
+        else -> null
+    }
+
+    /**
+     * 构建「项目视图操作」子菜单（1.7.2）：直接取平台 `ProjectViewPopupMenu` 动作组的子项
+     * （平台动作实例，不手写复制一份动作），从而与项目视图右键的行为/可用性/子菜单保持一致。
+     *
+     * - 原生书签组 `ExpandableBookmarkContextMenu` 排除（本插件已接管原生书签，避免冲突）；
+     *   插件自己的 `Favorites.Group` 同样排除（平台菜单里也挂着它，避免子菜单自我嵌套）；
+     * - 首尾/连续分隔线归一化；动作组取不到或过滤后为空时降级为不显示该子菜单（仅 warn 日志）；
+     * - 全程 runCatching，任何异常只记日志、不影响其它菜单项。
+     *
+     * @param targetFile 右键节点对应的虚拟文件（仅用于日志与调用方语义，动作本身经 DataContext 取目标）
+     * @return 子菜单动作组；不可用时返回 null
+     */
+    private fun buildProjectViewActionsSubmenu(targetFile: VirtualFile): DefaultActionGroup? {
+        // ////////////////  核心逻辑：取平台动作组子项 + 过滤排除项 + 分隔线归一化  start  ///
+        return runCatching {
+            val actionManager = ActionManager.getInstance()
+            val platformGroup = actionManager.getAction(PROJECT_VIEW_POPUP_MENU_ID) as? ActionGroup
+            if (platformGroup == null) {
+                log.warn(
+                    "未找到平台动作组 $PROJECT_VIEW_POPUP_MENU_ID，收藏树右键不显示「$PROJECT_VIEW_ACTIONS_TITLE」子菜单" +
+                        "（目标：${targetFile.path}）"
+                )
+                return null
+            }
+
+            val submenu = DefaultActionGroup(PROJECT_VIEW_ACTIONS_TITLE, true)
+            val keptActions = mutableListOf<AnAction>()
+            val excludedIds = mutableListOf<String>()
+            for (child in platformGroup.getChildren(null)) {
+                if (isExcludedProjectViewAction(child, actionManager, excludedIds)) continue
+                if (child is Separator) {
+                    // 首部分隔线 / 连续分隔线丢弃，尾部在循环后统一裁剪
+                    if (keptActions.isEmpty() || keptActions.last() is Separator) continue
+                    keptActions.add(child)
+                    continue
+                }
+                keptActions.add(child)
+            }
+            while (keptActions.isNotEmpty() && keptActions.last() is Separator) {
+                keptActions.removeAt(keptActions.size - 1)
+            }
+            if (excludedIds.isNotEmpty()) {
+                log.info("收藏树「$PROJECT_VIEW_ACTIONS_TITLE」已排除平台菜单项：${excludedIds.joinToString()}")
+            }
+            if (keptActions.isEmpty()) {
+                log.warn(
+                    "平台动作组 $PROJECT_VIEW_POPUP_MENU_ID 过滤后无可用子项，收藏树右键不显示「$PROJECT_VIEW_ACTIONS_TITLE」子菜单" +
+                        "（目标：${targetFile.path}）"
+                )
+                return null
+            }
+            keptActions.forEach { submenu.add(it) }
+            submenu
+        }.onFailure {
+            log.warn("构建收藏树右键「$PROJECT_VIEW_ACTIONS_TITLE」子菜单失败（仅保留收藏操作）", it)
+        }.getOrNull()
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 判断平台菜单项是否应从「项目视图操作」子菜单排除（1.7.2）：
+     * 原生书签组（本插件已接管）+ 插件自己的「收藏」组（避免子菜单自我嵌套）。
+     * 以 [ActionManager.getId] 为主判据（XML 中定义的动作组 id 原样返回，含 `popup@` 前缀）；
+     * 取不到 id 时按类名/文案兜底，避免动态动作漏过滤。
+     *
+     * @param action 平台子项（可能是动作、动作组或分隔符）
+     * @param actionManager 动作管理器（取动作 id）
+     * @param excludedIds 排除结果收集（日志输出用）
+     * @return true=排除
+     */
+    private fun isExcludedProjectViewAction(
+        action: AnAction,
+        actionManager: ActionManager,
+        excludedIds: MutableList<String>
+    ): Boolean {
+        // ////////////////  校验参数：分隔符不参与排除判定  start  //////////////////////
+        if (action is Separator) return false
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：id 优先，取不到时类名/文案兜底  start  /////////////
+        val actionId = runCatching { actionManager.getId(action) }
+            .onFailure { log.warn("取平台菜单项 id 失败：${action.javaClass.name}", it) }
+            .getOrNull()
+        val excluded = if (actionId != null) {
+            actionId in EXCLUDED_PROJECT_VIEW_ACTION_IDS
+        } else {
+            val templateText = runCatching { action.templatePresentation.text }.getOrNull()
+            action.javaClass.name.contains(EXCLUDED_NATIVE_BOOKMARK_GROUP_NAME) ||
+                templateText in EXCLUDED_PROJECT_VIEW_GROUP_TEXTS
+        }
+        if (excluded) excludedIds.add(actionId ?: action.javaClass.name)
+        return excluded
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 构建收藏树右键的 DataContext（1.7.2）：为平台项目视图动作提供与右键节点一致的目标，
+     * 保证「新建/删除/重命名/复制粘贴/同步」等动作作用在右键点中的文件/文件夹上，
+     * 而不是用户之前在其他视图里选中的其它文件（硬性安全要求）。
+     *
+     * 已知键返回目标节点对应值（取不到时的 null 也直接返回，不回退基础上下文——避免误用其它选中项）：
+     * PROJECT / VIRTUAL_FILE(_ARRAY) / PSI_ELEMENT / PSI_FILE / PSI_ELEMENT_ARRAY / NAVIGATABLE(_ARRAY) /
+     * IDE_VIEW / CONTEXT_COMPONENT / DELETE_ELEMENT_PROVIDER（目标删除器：只删右键目标，不碰项目视图选区）；
+     * 未识别的键回退到 [baseContext]，任何键都不抛异常（异常仅记日志并按 null 返回）。
+     *
+     * @param targetFile 右键节点解析出的虚拟文件
+     * @param baseContext 基础上下文（树组件处的平台上下文）
+     * @return 目标节点上下文
+     */
+    private fun buildTargetDataContext(targetFile: VirtualFile, baseContext: DataContext): DataContext {
+        // ////////////////  准备数据：目标节点的 PSI 元素 / PSI 文件 / NAVIGATABLE / IDE_VIEW  start  ////
+        val psiElement = psiElementOf(targetFile)
+        // PsiFile 供部分平台动作（按 PSI_FILE 优先取目标）使用
+        val psiFile = psiElement as? PsiFile
+        // PsiFile/PsiDirectory 均实现 Navigatable 时才可作为 NAVIGATABLE 提供
+        val navigatable = psiElement as? Navigatable
+        val targetIdeView = BookmarkTargetIdeView(targetFile)
+        val virtualFileArray = arrayOf(targetFile)
+        val psiElementArray = psiElement?.let { arrayOf(it) }
+        val navigatableArray = navigatable?.let { arrayOf(it) }
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：已知键返回目标值，未知键回退基础上下文  start  //////
+        return DataContext { dataId ->
+            when (dataId) {
+                CommonDataKeys.PROJECT.name -> project
+                CommonDataKeys.VIRTUAL_FILE.name -> targetFile
+                CommonDataKeys.VIRTUAL_FILE_ARRAY.name -> virtualFileArray
+                CommonDataKeys.PSI_ELEMENT.name -> psiElement
+                CommonDataKeys.PSI_FILE.name -> psiFile
+                PlatformCoreDataKeys.PSI_ELEMENT_ARRAY.name -> psiElementArray
+                CommonDataKeys.NAVIGATABLE.name -> navigatable
+                CommonDataKeys.NAVIGATABLE_ARRAY.name -> navigatableArray
+                PlatformDataKeys.DELETE_ELEMENT_PROVIDER.name -> targetDeleteProvider
+                DATA_ID_IDE_VIEW -> targetIdeView
+                PlatformCoreDataKeys.CONTEXT_COMPONENT.name -> this@BookmarksTree
+                else -> runCatching { baseContext.getData(dataId) }
+                    .onFailure { log.warn("读取右键菜单基础上下文失败（键：$dataId）", it) }
+                    .getOrNull()
+            }
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 解析虚拟文件对应的 PSI 元素（文件→PsiFile，目录→PsiDirectory）：
+     * 平台 PSI 解析需读动作保护，统一在 [ApplicationManager.runReadAction] 内执行；
+     * 解析失败/文件无效返回 null（不抛异常，平台动作按"无 PSI 元素"降级）。
+     *
+     * @param file 虚拟文件
+     * @return PSI 元素或 null
+     */
+    private fun psiElementOf(file: VirtualFile): PsiElement? = runCatching {
+        ApplicationManager.getApplication().runReadAction<PsiElement?> {
+            if (!file.isValid) return@runReadAction null
+            val psiManager = PsiManager.getInstance(project)
+            if (file.isDirectory) psiManager.findDirectory(file) else psiManager.findFile(file)
+        }
+    }.onFailure { log.warn("解析右键目标的 PSI 元素失败：${file.path}", it) }.getOrNull()
+
+    /**
+     * 轻量 IdeView 适配器（1.7.2）：按右键目标文件返回其所在目录的 PsiDirectory。
+     *
+     * 选择实现本适配器（方案 b）而不是「先用 ProjectView.select 选中目标再传真实 ProjectViewPane」（方案 a）：
+     * - 方案 a 的 `select` 对不在项目视图树里的目标（全局收藏的项目外文件、被排除文件等）会静默失败，
+     *   真实 ProjectViewPane 仍指向用户之前选中的节点——此时删除/重命名等会作用到错误文件（不安全）；
+     * - 本适配器的一切返回值都由右键节点派生，不读取也不改动用户在项目视图中的选中状态，天然不会误伤；
+     * - 代价：依赖项目视图面板自身提供的数据（如粘贴用的 PasteProvider）不会由本适配器伪造，
+     *   相关菜单项会被平台按"上下文不可用"置灰，属于安全降级（不会作用到错误目标）。
+     */
+    private inner class BookmarkTargetIdeView(private val targetFile: VirtualFile) : IdeView {
+
+        /**
+         * 目标文件/目录所在目录（文件取父目录、目录取自身；解析不到返回空数组）
+         */
+        override fun getDirectories(): Array<PsiDirectory> {
+            val directoryFile = if (targetFile.isDirectory) targetFile else targetFile.parent
+            val psiDirectory = directoryFile?.let { psiElementOf(it) as? PsiDirectory }
+            return psiDirectory?.let { arrayOf(it) } ?: emptyArray()
+        }
+
+        /**
+         * 目标目录（用于"新建"类动作；不做目录选择弹窗，始终取右键目标，避免选到其它位置）
+         */
+        override fun getOrChooseDirectory(): PsiDirectory? = getDirectories().firstOrNull()
+    }
+
     private fun registerKeyStrokes() {
         val inputMap = getInputMap(JComponent.WHEN_FOCUSED)
         val actionMap = getActionMap()
@@ -1579,12 +1966,7 @@ class BookmarksTree(
      */
     private fun resolveByAbsolutePath(path: String, absolute: Boolean): VirtualFile? {
         // ////////////////  准备数据：换算绝对路径  start  //////////////////////////////
-        val absolutePath = when {
-            absolute -> if (path.isEmpty()) "/" else path
-            else -> project.basePath?.let { basePath ->
-                if (path.isEmpty()) basePath else File(basePath, path).absolutePath
-            } ?: return null
-        }
+        val absolutePath = absolutePathOf(path, absolute) ?: return null
         // ////////////////  准备数据  end  ////////////////////////////////////////////
 
         // ////////////////  核心逻辑一：查 VFS 缓存（findFileByPath 需正斜杠风格路径）  start  //
@@ -1601,6 +1983,25 @@ class BookmarksTree(
             LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(normalizedPath))
         }.onFailure { log.warn("VFS 同步刷新兜底失败：$normalizedPath", it) }.getOrNull()
         // ////////////////  核心逻辑二  end  ///////////////////////////////////////////
+    }
+
+    /**
+     * 收藏/节点路径 → 绝对路径（项目作用域拼项目根相对路径；共享/全局作用域按绝对路径）
+     *
+     * @param path 路径字符串（""=作用域基准目录）
+     * @param absolute 是否绝对路径语义（共享/全局作用域=true）
+     * @return 绝对路径；项目作用域缺少项目根时返回 null
+     */
+    private fun absolutePathOf(path: String, absolute: Boolean): String? {
+        // ////////////////  核心逻辑：按绝对性换算  start  /////////////////////////////
+        return if (absolute) {
+            if (path.isEmpty()) "/" else path
+        } else {
+            project.basePath?.let { basePath ->
+                if (path.isEmpty()) basePath else File(basePath, path).absolutePath
+            }
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**
@@ -2026,6 +2427,88 @@ class BookmarksTree(
         dir.childrenLoaded = true
         (model as? DefaultTreeModel)?.nodeStructureChanged(treeNode)
         // ////////////////  逻辑后  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 刷新单个目录节点（1.7.2 右键「刷新此目录」）：
+     * 1) 目录本身缺失/不可解析 → 退化为整树重建（重算缺失态，保持现有语义、不抛异常）；
+     * 2) 可解析 → 平台 [RefreshQueue] 异步刷新该目录 VFS（recursive=true，不在 EDT 阻塞），
+     *    回调回 EDT 原位重置该节点并重新懒加载子项（已展开的目录保持展开）。
+     *
+     * @param treeNode 目录节点对应的树节点（右键点中时的节点实例）
+     * @param dir 目录节点用户对象
+     */
+    private fun refreshDirFromDisk(treeNode: DefaultMutableTreeNode, dir: DirNode) {
+        // ////////////////  准备数据：允许该路径重做一次 VFS 未收录兜底  start  ///////////
+        // 目录此前被判缺失时可能已在「每路径一次」兜底里失败过；用户显式刷新意味着重新触盘，
+        // 先移除该路径的一次性标记，让后续 resolve 能重新尝试刷新 VFS（外部新建目录立即可见）
+        absolutePathOf(dir.path, dir.scope != FavoriteScope.PROJECT)
+            ?.replace('\\', '/')
+            ?.let { vfsRefreshTriedPaths.remove(it) }
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  校验参数：目录缺失/不可解析时整树重建  start  /////////////////
+        if (dir.missing) {
+            refresh(filterText)
+            return
+        }
+        val dirFile = resolveNodePath(dir.scope, dir.path)
+        if (dirFile == null || !isReadableDirectory(dirFile)) {
+            // 目录不在 VFS 或已变成非目录：整树重建重算缺失态（不抛异常）
+            refresh(filterText)
+            return
+        }
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：异步刷新该目录 VFS，回调回 EDT 原位重置并重新懒加载  start
+        runCatching {
+            RefreshQueue.getInstance().refresh(true, true, Runnable {
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    reloadDirChildren(treeNode, dir)
+                }
+            }, listOf(dirFile))
+        }.onFailure { e ->
+            log.warn("刷新目录失败，退化为整树重建：${dir.path}", e)
+            refresh(filterText)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 目录子项重新懒加载（EDT）：仅在该节点仍属于当前树模型时执行——
+     * 清空已加载标记与子节点后重新走 [loadDirChildren]（骨架子项 + 真实子项），
+     * 刷新前处于展开态的节点及其子级目录保持展开
+     *
+     * @param treeNode 目录节点对应的树节点
+     * @param dir 目录节点用户对象
+     */
+    private fun reloadDirChildren(treeNode: DefaultMutableTreeNode, dir: DirNode) {
+        // ////////////////  校验参数：节点仍在当前树内（整树重建后旧节点已脱离模型）  start
+        val treeModel = model as? DefaultTreeModel ?: return
+        if (treeNode.root !== treeModel.root) return
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  准备数据：记录刷新前的展开态（含子级目录）  start  ////////////
+        val wasExpanded = isExpanded(TreePath(treeNode.path))
+        val expandedDirKeys = HashSet<String>()
+        walkForExpandedDirKeys(treeNode, expandedDirKeys)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：清空子节点后重新懒加载  start  /////////////////////
+        dir.childrenLoaded = false
+        dir.spineChildrenLoaded = false
+        treeNode.removeAllChildren()
+        if (wasExpanded) {
+            // 重新物化子项（loadDirChildren 内部会 nodeStructureChanged）并保持展开
+            loadDirChildren(treeNode, dir)
+            expandPath(TreePath(treeNode.path))
+            // 子级目录按刷新前记忆恢复展开（逐级触发懒加载），避免刷新子项后深层目录全部折叠
+            restoreExpansion(treeNode, expandedDirKeys)
+        } else {
+            treeModel.nodeStructureChanged(treeNode)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**

@@ -21,9 +21,11 @@ import javax.swing.tree.DefaultMutableTreeNode
  * - 共享收藏集合节点（1.7.0）：自己的集合=项目图标；订阅集合=锁定图标+灰色（只读），tooltip=来源项目路径
  * - 共享收藏空态提示节点（1.7.0）：信息图标 + 灰色提示文案
  * - 列表节点：文件夹图标 + "名称 (收藏数)"
- * - 目录节点：文件夹图标（展开/折叠同图标）+ 目录名；文件夹收藏节点灰色补充路径；目录缺失/不可读显示红叉图标
- * - 文件节点：IDE 文件类型图标（.php/.bat/.sql 等按扩展名自然区分）+ 文件名；文件收藏节点灰色补充父目录路径与描述
- * - 行收藏节点：助记符/匿名书签图标 + "行号:" + 灰色行内容
+ * - 目录节点：文件夹图标（展开/折叠同图标）+ 显示名（1.7.2 起文件夹收藏有别名时显示别名，否则目录名）；
+ *   文件夹收藏节点灰色补充路径、tooltip=目录名+路径+别名；目录缺失/不可读显示红叉图标
+ * - 文件节点：IDE 文件类型图标（.php/.bat/.sql 等按扩展名自然区分）+ 显示名（1.7.2 起有别名时显示别名，
+ *   否则文件名）；文件收藏节点灰色补充父目录路径，tooltip=文件名+完整路径+别名
+ * - 行收藏节点：助记符/匿名书签图标 + "行号:" + 灰色行内容（1.7.2 起有别名时灰色文本为「别名 · 行内容」）
  * - 未收藏真实文件节点：文件类型图标 + 文件名
  * - 规则匹配根节点（1.4.0）：文件夹图标 + "规则匹配 (N 规则/M 条)"
  * - 规则节点（1.4.0）：按规则类型给图标（正则/SQL/SSH）；主文本含状态后缀（✅ M / ⏳ / ❌），ERROR 时 tooltip=失败原因
@@ -93,13 +95,18 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                 if (bookmark?.mnemonic != null) {
                     append(BookmarkIconHelper.getMnemonicText(bookmark.mnemonic) + " ")
                 }
-                append(node.name)
+                // 主文本：文件夹收藏有别名时显示别名（1.7.2），否则目录名
+                append(node.displayName)
                 if (node.missing) {
                     // 缺失态：灰色补充缺失说明（叶子节点，由树侧不挂子节点控制）
                     append("  （目录不存在或不可读）", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-                } else if (bookmark != null && node.path.isNotEmpty()) {
+                } else if (bookmark != null) {
                     // 文件夹收藏：灰色补充完整路径（基准目录无路径则省略）
-                    append("  ${node.path}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    if (node.path.isNotEmpty()) {
+                        append("  ${node.path}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    }
+                    // tooltip：目录名 + 完整路径 + 别名
+                    toolTipText = buildNodeTooltip(node.name, node.path, aliasOf(bookmark.description))
                 }
             }
             // 文件节点：FILE 收藏本体或仅承载行收藏的文件容器
@@ -109,17 +116,16 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                 if (bookmark?.mnemonic != null) {
                     append(BookmarkIconHelper.getMnemonicText(bookmark.mnemonic) + " ")
                 }
-                append(node.name)
+                // 主文本：文件收藏有别名时显示别名（1.7.2），否则文件名
+                append(node.displayName)
                 if (bookmark != null) {
                     // 文件收藏：灰色补充父目录路径（基准目录下的文件无父路径则省略）
                     val parentPath = FavoritesTreePaths.parentPath(node.path)
                     if (parentPath.isNotEmpty()) {
                         append("  $parentPath", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     }
-                    // 有描述时灰色补充（速度搜索仍可通过收藏过滤命中描述）
-                    if (!bookmark.description.isNullOrBlank()) {
-                        append("  ${bookmark.description}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-                    }
+                    // tooltip：文件名 + 完整路径 + 别名
+                    toolTipText = buildNodeTooltip(node.name, node.path, aliasOf(bookmark.description))
                 }
             }
             // 行收藏节点：行号（主文本）+ 行内容（灰色）
@@ -202,6 +208,32 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
             }
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 别名归一：收藏描述非空白才算别名（与树节点 displayName 判定一致）
+     *
+     * @param description 收藏描述
+     * @return 别名或 null
+     */
+    private fun aliasOf(description: String?): String? = description?.takeIf { it.isNotBlank() }
+
+    /**
+     * 文件/目录节点 tooltip：名称 + 完整路径 + 别名（1.7.2 别名可见性支持；无别名时只给名称与路径）
+     *
+     * @param title 文件名/目录名
+     * @param path 完整路径（规范化后的节点路径）
+     * @param alias 别名（可空）
+     * @return tooltip 文本
+     */
+    private fun buildNodeTooltip(title: String, path: String, alias: String?): String = buildString {
+        append("名称: ").append(title)
+        if (path.isNotEmpty()) {
+            append('\n').append("路径: ").append(path)
+        }
+        if (alias != null) {
+            append('\n').append("别名: ").append(alias)
+        }
     }
 
     /**

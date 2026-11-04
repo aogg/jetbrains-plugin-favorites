@@ -28,9 +28,10 @@ import java.util.*
  * - 加入 GLOBAL/SHARED 时写入绝对路径；项目外位置只能加入 GLOBAL/SHARED。
  *
  * 1.4.x 原生书签快捷键接管：实现 [ScopedAddAction]，
- * 固定作用域入口（如原生 ToggleBookmarkWithMnemonic 委托）不弹作用域选择，
+ * **键盘快捷键入口**（如原生 ToggleBookmarkWithMnemonic 的 Ctrl+F11 键位）不弹作用域选择，
  * 直接按指定作用域打开助记符对话框；1.5.x 起目标分组取「该作用域上次使用的分组」，
- * 无记忆/记忆已删除则回退默认「收藏」；右键菜单等原入口行为不变。
+ * 无记忆/记忆已删除则回退默认「收藏」；**菜单/工具栏/右键菜单/查找操作等**原入口行为不变
+ * （1.7.2 起弹「作用域+分组」选择，见 [com.aogg.favorites.nativebookmarks.isKeyboardShortcutInvocation]）。
  */
 class AddMnemonicBookmarkAction : AnAction("添加助记收藏", "添加助记收藏", null), ScopedAddAction {
 
