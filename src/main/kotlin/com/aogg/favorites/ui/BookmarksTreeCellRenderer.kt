@@ -1,6 +1,7 @@
 package com.aogg.favorites.ui
 
 import com.aogg.favorites.helper.BookmarkIconHelper
+import com.aogg.favorites.helper.BookmarkPathMacros
 import com.aogg.favorites.model.RuleType
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
@@ -237,56 +238,52 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
     }
 
     /**
-     * 解析规则条目路径为虚拟文件（相对项目根拼接为主，兼容绝对路径）
+     * 解析规则条目路径为虚拟文件（相对项目根拼接为主，兼容绝对路径；1.7.3 起支持路径宏展开）
      * 仅用于渲染器计算文件类型图标，解析失败返回 null（走文件名推断兜底）
      *
      * @param path 规则条目路径
      * @return 虚拟文件或 null
      */
-    private fun resolveRuleItemFile(path: String): VirtualFile? {
-        // ////////////////  准备数据：项目根路径（显式可空类型，分支内可安全判空使用）  start  //
-        val basePath: String? = project.basePath
-        // ////////////////  准备数据  end  ///////////////////////////////////////////
-
-        // ////////////////  核心逻辑：按绝对性换算绝对路径后查 VFS 缓存  start  ///////////
-        return try {
-            val absolutePath = when {
-                FavoritesTreePaths.isAbsolutePath(path) -> path
-                basePath != null -> File(basePath, path).absolutePath
-                else -> return null
-            }
-            // findFileByPath 需要正斜杠风格路径
-            LocalFileSystem.getInstance().findFileByPath(absolutePath.replace('\\', '/'))
-            // ////////////////  核心逻辑  end  ///////////////////////////////////////
-        } catch (e: Exception) {
-            null
-        }
-    }
+    private fun resolveRuleItemFile(path: String): VirtualFile? =
+        findFirstExistingFile(path, FavoritesTreePaths.isAbsolutePath(path))
 
     /**
-     * 解析文件节点路径为虚拟文件（项目作用域=项目根拼接相对路径；全局作用域=绝对路径直用）
+     * 解析文件节点路径为虚拟文件（项目作用域=项目根拼接相对路径；全局作用域=绝对路径直用；
+     * 1.7.3 起支持路径宏展开，兼容历史导入的未展开宏坏数据）
      * 仅用于渲染器计算文件类型图标，解析失败返回 null（走文件名推断兜底）
      *
      * @param node 文件节点
      * @return 虚拟文件或 null
      */
-    private fun resolveNodeFile(node: FileNode): VirtualFile? {
-        // ////////////////  准备数据：项目根路径（显式可空类型，分支内可安全判空使用）  start  //
-        val basePath: String? = project.basePath
-        // ////////////////  准备数据  end  ///////////////////////////////////////////
+    private fun resolveNodeFile(node: FileNode): VirtualFile? =
+        findFirstExistingFile(node.path, FavoritesTreePaths.isAbsolutePath(node.path))
 
-        // ////////////////  核心逻辑：按作用域换算绝对路径后查 VFS 缓存  start  ///////////
-        return try {
+    /**
+     * 候选路径逐个查 VFS 缓存（宏展开后的绝对路径候选优先），返回首个命中
+     *
+     * @param path 原始路径（可能含未展开的 IDE 路径宏、反斜杠分隔符）
+     * @param absolute 是否绝对路径语义（项目作用域=false → 相对候选拼项目根）
+     * @return 虚拟文件或 null（全部候选都未收录）
+     */
+    private fun findFirstExistingFile(path: String, absolute: Boolean): VirtualFile? {
+        // ////////////////  准备数据：项目根路径 + 宏展开候选  start  ////////////////////
+        val basePath: String? = project.basePath
+        val candidates = BookmarkPathMacros.candidates(path, basePath)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：按候选的绝对性换算后查 VFS 缓存  start  ///////////
+        val localFileSystem = LocalFileSystem.getInstance()
+        for (candidate in candidates) {
+            // 候选自身是绝对路径（宏已展开成绝对路径）时按绝对路径直用
             val absolutePath = when {
-                FavoritesTreePaths.isAbsolutePath(node.path) -> node.path
-                basePath != null -> File(basePath, node.path).absolutePath
-                else -> return null
+                absolute || FavoritesTreePaths.isAbsolutePath(candidate) -> candidate
+                basePath != null -> File(basePath, candidate).absolutePath
+                else -> continue
             }
             // findFileByPath 需要正斜杠风格路径
-            LocalFileSystem.getInstance().findFileByPath(absolutePath.replace('\\', '/'))
-            // ////////////////  核心逻辑  end  ///////////////////////////////////////
-        } catch (e: Exception) {
-            null
+            localFileSystem.findFileByPath(absolutePath.replace('\\', '/'))?.let { return it }
         }
+        return null
+        // ////////////////  核心逻辑  end  ///////////////////////////////////////
     }
 }

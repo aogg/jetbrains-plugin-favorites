@@ -1,14 +1,17 @@
 package com.aogg.favorites.ui
 
+import com.aogg.favorites.helper.BookmarkFileResolver
 import com.aogg.favorites.helper.BookmarkIconHelper
+import com.aogg.favorites.helper.BookmarkOpenNotifier
+import com.aogg.favorites.helper.BookmarkPathMacros
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkType
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.model.FavoritesScopeResolver
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.ListSpeedSearch
 import com.intellij.ui.components.JBList
 import com.intellij.ui.popup.PopupFactoryImpl
@@ -132,33 +135,29 @@ class BookmarkPopup(
     }
 
     /**
-     * 导航到收藏位置（项目收藏相对路径拼项目根；全局收藏绝对路径直用）
+     * 导航到收藏位置（1.7.3 起走共享解析器 [BookmarkFileResolver]：路径宏展开候选 + 逐候选查 VFS +
+     * 每路径一次刷新兜底，与收藏树/助记符跳转同一实现；解析失败发非模态警告通知，不再静默返回）
      */
     private fun navigateToBookmark(bookmark: Bookmark) {
-        // 获取项目根目录
-        val projectBaseDir = project.baseDir ?: return
+        // ////////////////  准备数据：共享解析器解析收藏目标文件  start  //////////////////
+        val virtualFile = BookmarkFileResolver.findExistingFile(bookmark.filePath, project)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
 
-        // 构建完整文件路径
-        val filePath = if (java.io.File(bookmark.filePath).isAbsolute) {
-            bookmark.filePath
-        } else {
-            java.io.File(projectBaseDir.path, bookmark.filePath).absolutePath
-        }
-
-        // 查找虚拟文件
-        val virtualFile = LocalFileSystem.getInstance().findFileByPath(filePath) ?: return
-
-        if (!virtualFile.exists()) {
+        // ////////////////  校验参数：解析失败/文件不存在时明确提示（日志 + 通知）  start  ////
+        if (virtualFile == null || !virtualFile.exists()) {
+            notifyOpenFailed(bookmark)
             return
         }
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
 
-        // 打开文件
+        // ////////////////  核心逻辑一：打开文件  start  ////////////////////////////////
         val fileEditorManager = FileEditorManager.getInstance(project)
         fileEditorManager.openFile(virtualFile, true)
+        // ////////////////  核心逻辑一  end  //////////////////////////////////////////
 
-        // 如果是代码行收藏，跳转到指定行
+        // ////////////////  核心逻辑二：行收藏定位到指定行（lineNumber 为 0 基）  start  ////
         if (bookmark.type == BookmarkType.LINE && bookmark.lineNumber >= 0) {
-            // 等待文件打开
+            // 等待文件打开完成后再定位，避免选中的编辑器还是旧文件
             com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
                 val editor = fileEditorManager.selectedTextEditor ?: return@invokeLater
                 val document = editor.document
@@ -170,12 +169,35 @@ class BookmarkPopup(
                 }
             }
         }
+        // ////////////////  核心逻辑二  end  //////////////////////////////////////////
+    }
+
+    /**
+     * 收藏打开失败提示（1.7.3）：日志 + 共享的非模态 WARNING 通知（候选路径超长/过多自动截断）
+     *
+     * @param bookmark 收藏
+     */
+    private fun notifyOpenFailed(bookmark: Bookmark) {
+        // ////////////////  核心逻辑：日志 + 非模态警告通知（不阻塞 EDT、不静默）  start  ///
+        log.warn("无法打开收藏（快速访问弹窗）：名称=${bookmark.getDisplayName()}，路径=${bookmark.filePath}")
+        BookmarkOpenNotifier.notifyOpenFailed(
+            project,
+            bookmark.getDisplayName(),
+            bookmark.filePath,
+            BookmarkPathMacros.candidates(bookmark.filePath, project.basePath)
+        )
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**
      * 格式化收藏显示文本（委托文件级共享函数，供嵌套类复用）
      */
     private fun formatBookmarkText(bookmark: Bookmark): String = formatPopupBookmarkText(bookmark)
+
+    companion object {
+        /** 日志 */
+        private val log = Logger.getInstance(BookmarkPopup::class.java)
+    }
 
     /**
      * 收藏列表单元格渲染器：作用域标题加粗+作用域图标；列表标题加粗+文件夹图标；

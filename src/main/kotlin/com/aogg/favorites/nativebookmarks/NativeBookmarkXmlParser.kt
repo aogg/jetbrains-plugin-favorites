@@ -1,6 +1,8 @@
 package com.aogg.favorites.nativebookmarks
 
+import com.aogg.favorites.helper.BookmarkPathMacros
 import org.jdom.Element
+import java.util.Locale
 
 /**
  * 原生书签 XML 容错解析器（通道二，平台解耦）
@@ -35,6 +37,15 @@ object NativeBookmarkXmlParser {
     private const val OLD_BOOKMARK_TAG = "Bookmark"
     private const val GROUP_TAG = "GroupState"
     private const val PROJECT_DIR_MACRO = "\$PROJECT_DIR$"
+
+    /** 宏占位符（判定路径里是否还残留未展开宏，如 $MODULE_DIR$） */
+    private val MACRO_TOKEN_PATTERN = Regex("\\$[A-Za-z_][A-Za-z0-9_]*\\$?")
+
+    /** Windows 盘符前缀（绝对路径判定用） */
+    private val DRIVE_PREFIX_PATTERN = Regex("^[A-Za-z]:/")
+
+    /** 嵌套盘符（完全展开后出现第二个盘符段=无效路径，如 D:/proj/C:/Users/...） */
+    private val NESTED_DRIVE_PATTERN = Regex("^[A-Za-z]:/.*[A-Za-z]:/")
 
     /**
      * 解析原生书签 XML（bookmarks.xml / workspace.xml 中 BookmarksManager 组件的根 Element）
@@ -137,6 +148,7 @@ object NativeBookmarkXmlParser {
     /**
      * url → 项目相对路径：
      * - file://$PROJECT_DIR$/src/a.php → src/a.php
+     * - file://$APPLICATION_CONFIG_DIR$/consoles/x/console.sql → 配置目录绝对路径（项目外原样保留）
      * - file:///abs/path/project/src/a.php → src/a.php（可归约时）
      * - 已是相对路径则原样返回（'\' 统一为 '/'）
      * - 无法归约的项目外绝对路径原样保留（仍可跳转），不做丢弃
@@ -153,23 +165,65 @@ object NativeBookmarkXmlParser {
         }
         path = path.replace('\\', '/').trim()
 
-        // 展开 $PROJECT_DIR$ 宏
-        if (path.contains(PROJECT_DIR_MACRO)) {
-            if (projectBasePath.isNullOrBlank()) return null
-            path = path.replace(PROJECT_DIR_MACRO, projectBasePath.trimEnd('/'))
-        }
+        // ////////////////  校验参数：$PROJECT_DIR$ 宏必须有项目根才能展开  start  //////
+        // 保持既有语义：无项目根时该宏无法解析，整条书签跳过导入
+        if (path.contains(PROJECT_DIR_MACRO) && projectBasePath.isNullOrBlank()) return null
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
 
-        if (path.startsWith("/")) {
-            val base = projectBasePath?.trimEnd('/') ?: return path.trimStart('/')
-            return if (path == base) {
-                ""
-            } else if (path.startsWith("$base/")) {
-                path.substring(base.length + 1)
-            } else {
-                path // 项目外路径原样保留
-            }
+        // ////////////////  核心逻辑一：路径宏展开（1.7.3）  start  //////////////////////
+        // 旧实现只展开 $PROJECT_DIR$，$APPLICATION_CONFIG_DIR$ 等宏被当成项目内相对路径原样保留，
+        // 导入后必然解析不到（双击无反应）；现改为候选优先级：完整展开 → 宏截断展开 → 原样，
+        // 取第一个「宏已全部展开且不含嵌套盘符」的候选作为导入路径
+        val expanded = selectExpandedCandidate(BookmarkPathMacros.candidates(path, projectBasePath))
+            ?: return null
+        // ////////////////  核心逻辑一  end  ///////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：绝对路径归约为项目相对路径  start  ////////////////
+        return reduceToProjectPath(expanded, projectBasePath)
+        // ////////////////  核心逻辑二  end  ///////////////////////////////////////////
+    }
+
+    /**
+     * 从候选路径中选出首个可用项：宏已全部展开、不含嵌套盘符（嵌套盘符=无效路径）、不含重复分隔符
+     * （`项目根//绝对路径` 这类拼接产物）；都不可用时退回首个候选（保留原样行为，交给解析期再展开）
+     *
+     * @param candidates [BookmarkPathMacros.candidates] 产出的候选列表
+     * @return 选中的路径；候选为空返回 null
+     */
+    private fun selectExpandedCandidate(candidates: List<String>): String? =
+        candidates.firstOrNull {
+            !MACRO_TOKEN_PATTERN.containsMatchIn(it) &&
+                !NESTED_DRIVE_PATTERN.containsMatchIn(it) &&
+                // 重复分隔符只在 UNC 前缀（//server/share）合法，其余位置视为无效拼接
+                !it.substring(1).contains("//")
+        } ?: candidates.firstOrNull()
+
+    /**
+     * 绝对路径归约为项目相对路径：项目内路径归约，项目外绝对路径原样保留，相对路径原样返回
+     *
+     * @param path 已展开宏的路径（正斜杠风格）
+     * @param projectBasePath 项目根路径（可空）
+     * @return 项目相对路径 / 项目外绝对路径 / 原相对路径
+     */
+    private fun reduceToProjectPath(path: String, projectBasePath: String?): String {
+        // ////////////////  校验参数：基准路径 + 绝对性判定  start  //////////////////////
+        val base = projectBasePath?.trim()?.replace('\\', '/')?.trimEnd('/')?.takeIf { it.isNotEmpty() }
+        // 绝对性判定：Unix 前导斜杠 或 Windows 盘符前缀；相对路径原样返回
+        val isAbsolute = path.startsWith("/") || DRIVE_PREFIX_PATTERN.containsMatchIn(path)
+        if (!isAbsolute) return path
+        if (base == null) return if (path.startsWith("/")) path.trimStart('/') else path
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：按前缀归约（Windows 盘符路径大小写不敏感）  start  //
+        val ignoreCase = DRIVE_PREFIX_PATTERN.containsMatchIn(path) && DRIVE_PREFIX_PATTERN.containsMatchIn(base)
+        val comparedPath = if (ignoreCase) path.lowercase(Locale.ROOT) else path
+        val comparedBase = if (ignoreCase) base.lowercase(Locale.ROOT) else base
+        return when {
+            comparedPath == comparedBase -> ""
+            comparedPath.startsWith("$comparedBase/") -> path.substring(base.length + 1)
+            else -> path // 项目外路径原样保留
         }
-        return path
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**

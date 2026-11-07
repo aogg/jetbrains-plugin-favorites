@@ -1,15 +1,17 @@
 package com.aogg.favorites.action
 
+import com.aogg.favorites.helper.BookmarkFileResolver
+import com.aogg.favorites.helper.BookmarkOpenNotifier
+import com.aogg.favorites.helper.BookmarkPathMacros
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.LocalFileSystem
 
 /**
  * 跳转到助记符收藏的动作
@@ -73,33 +75,32 @@ class JumpToMnemonicBookmarkAction : AnAction() {
     }
 
     /**
-     * 导航到收藏位置
+     * 导航到收藏位置（1.7.3 起走共享解析器 [BookmarkFileResolver]：路径宏展开候选 + 逐候选查 VFS +
+     * 每路径一次刷新兜底，与收藏树/快速访问弹窗同一实现；解析失败发非模态警告通知，不再静默返回）
+     *
+     * @param project 当前项目
+     * @param bookmark 助记符收藏
      */
     private fun navigateToBookmark(project: Project, bookmark: com.aogg.favorites.model.Bookmark) {
-        // 获取项目根目录
-        val projectBaseDir = project.baseDir ?: return
-        
-        // 构建完整文件路径
-        val filePath = if (java.io.File(bookmark.filePath).isAbsolute) {
-            bookmark.filePath
-        } else {
-            java.io.File(projectBaseDir.path, bookmark.filePath).absolutePath
-        }
-        
-        // 查找虚拟文件
-        val virtualFile = LocalFileSystem.getInstance().findFileByPath(filePath) ?: return
-        
-        if (!virtualFile.exists()) {
+        // ////////////////  准备数据：共享解析器解析收藏目标文件  start  //////////////////
+        val virtualFile = BookmarkFileResolver.findExistingFile(bookmark.filePath, project)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  校验参数：解析失败/文件不存在时明确提示（日志 + 通知）  start  ////
+        if (virtualFile == null || !virtualFile.exists()) {
+            notifyOpenFailed(project, bookmark)
             return
         }
-        
-        // 打开文件
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑一：打开文件  start  ////////////////////////////////
         val fileEditorManager = FileEditorManager.getInstance(project)
         fileEditorManager.openFile(virtualFile, true)
-        
-        // 如果是代码行收藏，跳转到指定行
+        // ////////////////  核心逻辑一  end  //////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：行收藏定位到指定行（lineNumber 为 0 基）  start  ////
         if (bookmark.type == BookmarkType.LINE && bookmark.lineNumber >= 0) {
-            // 等待文件打开
+            // 等待文件打开完成后再定位，避免选中的编辑器还是旧文件
             com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
                 val editor = fileEditorManager.selectedTextEditor ?: return@invokeLater
                 val document = editor.document
@@ -111,5 +112,29 @@ class JumpToMnemonicBookmarkAction : AnAction() {
                 }
             }
         }
+        // ////////////////  核心逻辑二  end  //////////////////////////////////////////
+    }
+
+    /**
+     * 收藏打开失败提示（1.7.3）：日志 + 共享的非模态 WARNING 通知（候选路径超长/过多自动截断）
+     *
+     * @param project 当前项目
+     * @param bookmark 助记符收藏
+     */
+    private fun notifyOpenFailed(project: Project, bookmark: com.aogg.favorites.model.Bookmark) {
+        // ////////////////  核心逻辑：日志 + 非模态警告通知（不阻塞 EDT、不静默）  start  ///
+        log.warn("无法打开收藏（助记符跳转）：名称=${bookmark.getDisplayName()}，路径=${bookmark.filePath}")
+        BookmarkOpenNotifier.notifyOpenFailed(
+            project,
+            bookmark.getDisplayName(),
+            bookmark.filePath,
+            BookmarkPathMacros.candidates(bookmark.filePath, project.basePath)
+        )
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    companion object {
+        /** 日志 */
+        private val log = Logger.getInstance(JumpToMnemonicBookmarkAction::class.java)
     }
 }

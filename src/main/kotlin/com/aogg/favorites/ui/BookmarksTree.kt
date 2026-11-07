@@ -1,6 +1,9 @@
 package com.aogg.favorites.ui
 
+import com.aogg.favorites.helper.BookmarkFileResolver
 import com.aogg.favorites.helper.BookmarkIconHelper
+import com.aogg.favorites.helper.BookmarkOpenNotifier
+import com.aogg.favorites.helper.BookmarkPathMacros
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.model.FavoritesScopeResolver
@@ -29,6 +32,7 @@ import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.ScrollType
@@ -526,6 +530,22 @@ class BookmarksTree(
         /** 全部展开时的行数安全上限（防止在超大真实目录树上无限懒加载） */
         private const val MAX_EXPAND_ROWS = 10000
 
+        /** 数据库控制台收藏兜底：IDE 配置目录下的控制台根目录名 */
+        private const val CONSOLES_DIR_NAME = "consoles"
+
+        /** 数据库控制台收藏兜底：控制台脚本文件名 */
+        private const val CONSOLE_FILE_NAME = "console.sql"
+
+        /** 数据库控制台收藏兜底：最大遍历深度（相对 consoles 根，含根算 0 层） */
+        private const val CONSOLES_MAX_DEPTH = 4
+
+        /** 数据库控制台收藏兜底：最大遍历条目数（防超大目录卡顿） */
+        private const val CONSOLES_MAX_ENTRIES = 2000
+
+        /** 数据库控制台收藏路径尾部特征：`.../consoles/<id>/console.sql`（第 1 组=控制台 id） */
+        private val CONSOLE_FILE_PATTERN =
+            Regex("(?:^|/)consoles/([A-Za-z0-9_-]+)/console\\.sql$", RegexOption.IGNORE_CASE)
+
         /** 平台项目视图右键菜单动作组 id（1.7.2 收藏树右键「项目视图操作」子菜单的动作来源） */
         private const val PROJECT_VIEW_POPUP_MENU_ID = "ProjectViewPopupMenu"
 
@@ -571,9 +591,6 @@ class BookmarksTree(
 
     /** 行内容缓存：文件绝对路径（正斜杠规范）→（行号 → 行文本；null=空白行/读取失败，显示时回退收藏描述）。仅 EDT 访问 */
     private val lineContentCache = HashMap<String, HashMap<Int, String?>>()
-
-    /** 已做过 VFS 同步刷新兜底的绝对路径集合（每路径只试一次，防过滤输入等高频刷新反复触盘；并发安全） */
-    private val vfsRefreshTriedPaths: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
      * 「项目视图操作」子菜单的删除器（1.7.2）：只删除注入上下文里的右键目标
@@ -736,7 +753,7 @@ class BookmarksTree(
 
     /**
      * 从磁盘刷新收藏树（1.7.2 工具栏「刷新」的树侧统一入口）：
-     * 先清空「VFS 未收录路径只尝试一次」缓存（[vfsRefreshTriedPaths]），再重建树——
+     * 先清空共享解析器的「VFS 未收录路径只尝试一次」缓存（[BookmarkFileResolver.clearRefreshTriedPaths]），再重建树——
      * 外部新增/删除的文件与目录立即可见；展开记忆与过滤关键字沿用 [refresh] 现成逻辑
      * （作用域/分组/规则层级始终展开，已展开目录按记忆恢复，其它现有行为不变）
      *
@@ -744,7 +761,7 @@ class BookmarksTree(
      */
     fun refreshFromDisk(filter: String = filterText) {
         // ////////////////  核心逻辑：清空 VFS 兜底缓存（让上次未收录路径重新尝试刷新）  start
-        vfsRefreshTriedPaths.clear()
+        BookmarkFileResolver.clearRefreshTriedPaths()
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
         // ////////////////  逻辑后：按展开记忆与过滤词重建树  start  ////////////////////
@@ -1240,14 +1257,36 @@ class BookmarksTree(
 
     /**
      * 跳转到收藏位置（行→编辑器定位；文件→打开；文件夹→Project 视图选中）
-     * 兼容两种作用域：项目收藏相对路径拼项目根；全局收藏绝对路径直用
+     * 兼容两种作用域：项目收藏相对路径拼项目根；全局收藏绝对路径直用；
+     * 路径中的 IDE 宏（$PROJECT_DIR$ / $APPLICATION_CONFIG_DIR$ 等）在解析期展开（1.7.3）
      */
     fun navigateToBookmark(bookmark: Bookmark) {
-        val file = resolveVirtualFile(bookmark) ?: return
-        if (!file.exists()) {
+        // ////////////////  准备数据：解析收藏目标文件  start  //////////////////////////
+        val file = resolveVirtualFile(bookmark)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑一：解析失败/文件不存在→兜底查找 + 可诊断提示  start  //
+        // 历史行为是静默 return，用户只能看到「双击没反应」；1.7.3 起先尝试数据库控制台收藏
+        // 在 IDE 配置目录下的兜底查找，仍然失败才弹非模态警告通知（不阻塞 EDT）
+        if (file == null || !file.exists()) {
+            if (tryLocateConsoleFileAsync(bookmark)) return
+            notifyOpenFailed(bookmark)
             return
         }
+        // ////////////////  核心逻辑一  end  ///////////////////////////////////////////
 
+        // ////////////////  核心逻辑二：按收藏类型跳转  start  //////////////////////////
+        openBookmarkTarget(bookmark, file)
+        // ////////////////  核心逻辑二  end  ///////////////////////////////////////////
+    }
+
+    /**
+     * 按收藏类型打开已解析的文件（文件夹→Project 视图选中；文件/行→编辑器打开，行收藏再定位到目标行）
+     *
+     * @param bookmark 收藏
+     * @param file 已解析且存在的虚拟文件
+     */
+    private fun openBookmarkTarget(bookmark: Bookmark, file: VirtualFile) {
         when {
             bookmark.isFolderBookmark() -> {
                 // 选中到 Project 视图（不抢焦点）
@@ -1272,6 +1311,108 @@ class BookmarksTree(
                 }
             }
         }
+    }
+
+    /**
+     * 数据库控制台收藏兜底查找（1.7.3，只读）：路径尾部形如 `consoles/<id>/console.sql` 时，
+     * 在 IDE 配置目录的 consoles 下按 `<id>/console.sql` 后缀做有限深度/有限条目的本地查找（非 EDT）。
+     * 命中回 EDT 打开，未命中回 EDT 弹「无法打开收藏」通知。
+     *
+     * @param bookmark 收藏
+     * @return true=已接管（异步流程负责后续打开/提示）；false=不适用（仍由调用方提示）
+     */
+    private fun tryLocateConsoleFileAsync(bookmark: Bookmark): Boolean {
+        // ////////////////  校验参数：仅数据库控制台收藏走兜底  start  ////////////////////
+        val consoleId = consoleDirectoryIdOf(bookmark.filePath) ?: return false
+        val application = ApplicationManager.getApplication() ?: return false
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑一：后台只读查找（不阻塞 EDT，不缓存失败结果）  start  //
+        application.executeOnPooledThread {
+            val located = runCatching { findConsoleFileById(consoleId) }
+                .onFailure { log.warn("数据库控制台收藏兜底查找失败：${bookmark.filePath}", it) }
+                .getOrNull()
+
+            // ////////////////  核心逻辑二：回 EDT 刷新并打开（失败则提示）  start  ////////
+            application.invokeLater {
+                val file = located?.let { consolePath ->
+                    runCatching {
+                        LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(consolePath))
+                    }.onFailure { log.warn("数据库控制台收藏兜底刷新失败：$consolePath", it) }.getOrNull()
+                }
+                if (file == null) {
+                    notifyOpenFailed(bookmark)
+                } else {
+                    openBookmarkTarget(bookmark, file)
+                }
+                // ////////////////  核心逻辑二  end  ////////////////////////////////////
+            }
+        }
+        // ////////////////  核心逻辑一  end  ///////////////////////////////////////////
+        return true
+    }
+
+    /**
+     * 从收藏路径尾部提取数据库控制台 id（`.../consoles/<id>/console.sql`）
+     *
+     * @param filePath 收藏路径
+     * @return 控制台目录 id；不是控制台收藏返回 null
+     */
+    private fun consoleDirectoryIdOf(filePath: String): String? =
+        CONSOLE_FILE_PATTERN.find(filePath.replace('\\', '/'))?.groupValues?.get(1)
+
+    /**
+     * 在 IDE 配置目录的 consoles 下按 `<id>/console.sql` 后缀查找控制台脚本（后台线程只读调用）。
+     * 深度上限 [CONSOLES_MAX_DEPTH]、条目上限 [CONSOLES_MAX_ENTRIES]，超限立即放弃，避免卡顿。
+     *
+     * @param consoleId 控制台目录 id
+     * @return 命中脚本的绝对路径（正斜杠风格）；未命中返回 null
+     */
+    private fun findConsoleFileById(consoleId: String): String? {
+        // ////////////////  准备数据：配置目录 consoles 根 + 目标后缀  start  ////////////
+        val consolesRoot = File(PathManager.getConfigPath(), CONSOLES_DIR_NAME)
+        if (!consolesRoot.isDirectory) return null
+        val targetSuffix = "/$CONSOLES_DIR_NAME/$consoleId/$CONSOLE_FILE_NAME"
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：深度优先遍历（深度/条目双上限）  start  ////////////
+        var visited = 0
+        val stack = ArrayDeque<Pair<File, Int>>()
+        stack.addLast(consolesRoot to 0)
+        while (stack.isNotEmpty()) {
+            val (directory, depth) = stack.removeLast()
+            if (depth >= CONSOLES_MAX_DEPTH) continue
+            val children = directory.listFiles() ?: continue
+            for (child in children) {
+                if (++visited > CONSOLES_MAX_ENTRIES) return null
+                if (child.isDirectory) {
+                    stack.addLast(child to (depth + 1))
+                } else if (child.name.equals(CONSOLE_FILE_NAME, ignoreCase = true)) {
+                    val normalized = child.absolutePath.replace('\\', '/')
+                    if (normalized.endsWith(targetSuffix, ignoreCase = true)) return normalized
+                }
+            }
+        }
+        return null
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 收藏打开失败提示（1.7.3）：日志 + 共享的非模态 WARNING 通知（内容含收藏名、原始路径、
+     * 已尝试的候选路径；候选条数与单条长度的截断规则见 [BookmarkOpenNotifier]）
+     *
+     * @param bookmark 收藏
+     */
+    private fun notifyOpenFailed(bookmark: Bookmark) {
+        // ////////////////  准备数据：诊断信息（候选列表同时用于日志与通知）  start  //////
+        val displayName = bookmark.getDisplayName()
+        val candidates = BookmarkPathMacros.candidates(bookmark.filePath, project.basePath)
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：日志 + 非模态警告通知（不弹模态框、不阻塞 EDT）  start
+        log.warn("无法打开收藏：名称=$displayName，原始路径=${bookmark.filePath}，候选=$candidates")
+        BookmarkOpenNotifier.notifyOpenFailed(project, displayName, bookmark.filePath, candidates)
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**
@@ -1957,52 +2098,15 @@ class BookmarksTree(
 
     /**
      * 按路径与绝对性解析虚拟文件（统一入口，供收藏/节点两类解析复用）：
-     * 先查 VFS 缓存；未命中时做「每路径一次」的同步刷新兜底——目录真实存在但从未进 VFS 的收藏
-     * （全局作用域/导入收编/IDE 重启后）也能解析出节点，避免误显示缺失态红叉、保证文件夹收藏可展开
-     *
-     * @param path 路径字符串
-     * @param absolute 是否绝对路径语义
-     * @return 虚拟文件或 null（路径不存在或兜底不可用）
-     */
-    private fun resolveByAbsolutePath(path: String, absolute: Boolean): VirtualFile? {
-        // ////////////////  准备数据：换算绝对路径  start  //////////////////////////////
-        val absolutePath = absolutePathOf(path, absolute) ?: return null
-        // ////////////////  准备数据  end  ////////////////////////////////////////////
-
-        // ////////////////  核心逻辑一：查 VFS 缓存（findFileByPath 需正斜杠风格路径）  start  //
-        val normalizedPath = absolutePath.replace('\\', '/')
-        LocalFileSystem.getInstance().findFileByPath(normalizedPath)?.let { return it }
-        // ////////////////  核心逻辑一  end  ///////////////////////////////////////////
-
-        // ////////////////  核心逻辑二：VFS 未收录时同步刷新兜底  start  ///////////////////
-        // read/write action 内禁止同步刷新（平台断言），自动跳过；每路径只尝试一次防高频触盘
-        val application = ApplicationManager.getApplication() ?: return null
-        if (application.isReadAccessAllowed || application.isWriteAccessAllowed) return null
-        if (!vfsRefreshTriedPaths.add(normalizedPath)) return null
-        return runCatching {
-            LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(normalizedPath))
-        }.onFailure { log.warn("VFS 同步刷新兜底失败：$normalizedPath", it) }.getOrNull()
-        // ////////////////  核心逻辑二  end  ///////////////////////////////////////////
-    }
-
-    /**
-     * 收藏/节点路径 → 绝对路径（项目作用域拼项目根相对路径；共享/全局作用域按绝对路径）
+     * 实现全部委托给共享解析器 [BookmarkFileResolver.findExistingFile]（1.7.3 起收藏树、快速访问弹窗、
+     * 助记符跳转共用同一套「路径宏展开候选 → 逐候选查 VFS → 每候选绝对路径一次同步刷新兜底」逻辑）
      *
      * @param path 路径字符串（""=作用域基准目录）
-     * @param absolute 是否绝对路径语义（共享/全局作用域=true）
-     * @return 绝对路径；项目作用域缺少项目根时返回 null
+     * @param absolute 是否绝对路径语义
+     * @return 虚拟文件或 null（全部候选都不存在或兜底不可用）
      */
-    private fun absolutePathOf(path: String, absolute: Boolean): String? {
-        // ////////////////  核心逻辑：按绝对性换算  start  /////////////////////////////
-        return if (absolute) {
-            if (path.isEmpty()) "/" else path
-        } else {
-            project.basePath?.let { basePath ->
-                if (path.isEmpty()) basePath else File(basePath, path).absolutePath
-            }
-        }
-        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
-    }
+    private fun resolveByAbsolutePath(path: String, absolute: Boolean): VirtualFile? =
+        BookmarkFileResolver.findExistingFile(path, project, absolute)
 
     /**
      * 路径是否解析为可读目录（文件夹收藏展开能力判定）
@@ -2442,9 +2546,7 @@ class BookmarksTree(
         // ////////////////  准备数据：允许该路径重做一次 VFS 未收录兜底  start  ///////////
         // 目录此前被判缺失时可能已在「每路径一次」兜底里失败过；用户显式刷新意味着重新触盘，
         // 先移除该路径的一次性标记，让后续 resolve 能重新尝试刷新 VFS（外部新建目录立即可见）
-        absolutePathOf(dir.path, dir.scope != FavoriteScope.PROJECT)
-            ?.replace('\\', '/')
-            ?.let { vfsRefreshTriedPaths.remove(it) }
+        BookmarkFileResolver.forgetRefreshTriedPath(dir.path, project, dir.scope != FavoriteScope.PROJECT)
         // ////////////////  准备数据  end  ////////////////////////////////////////////
 
         // ////////////////  校验参数：目录缺失/不可解析时整树重建  start  /////////////////

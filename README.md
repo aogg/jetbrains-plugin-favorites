@@ -16,6 +16,7 @@
 - **收藏树交互（1.7.2）**：右键收藏的文件/文件夹/真实目录新增「项目视图操作」子菜单——直接复用平台项目视图动作，并注入与右键节点一致的 DataContext，删除/重命名/新建等动作作用在右键目标而不是项目视图旧选区；工具栏「全部折叠」后新增「刷新」按钮（异步刷新收藏路径的 VFS 后重建树，保留展开记忆与过滤词），文件夹收藏/真实目录右键可「刷新此目录」；「编辑描述」改名为「重命名别名」，别名立即可见（文件/文件夹主文本、行收藏灰色说明、tooltip 原名/路径/别名）
 - **快速访问**：弹出窗口快速跳转到收藏位置（按「项目收藏」「全局收藏」分组，组内按「父组/子组」完整分组路径展示）
 - **导入原生书签**：一键导入 PhpStorm 原生书签（运行时 API + .idea XML 容错解析双通道，自动去重、增量合并，助记符随迁）
+- **收藏路径宏解析与打开失败提示（1.7.3）**：原生书签导入的收藏支持展开 `$APPLICATION_CONFIG_DIR$` / `$USER_HOME$` / `$PROJECT_DIR$` 等 IDE 路径宏（导入期展开 + 项目内外路径归约）；历史遗留的未展开宏路径（如 `file://$APPLICATION_CONFIG_DIR$/consoles/xxx/console.sql`）在打开时按候选路径自动修复解析，收藏树、快速访问弹窗、助记符跳转三个入口共用同一套「宏展开候选 → 逐候选查 VFS → 每路径一次刷新兜底」解析器；打开失败从静默返回改为明确提示——日志 + 非模态 WARNING 通知（收藏名/原始路径/已尝试候选，超长与条数自动截断），数据库控制台收藏另有按控制台 id 在 IDE 配置目录 `consoles` 下兜底查找
 - **原生书签快捷键接管**：F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 与 Ctrl+点击行号区/图标区手势**始终**由本插件接管（与设置开关无关）；其中**键盘快捷键与 Ctrl+点击手势**固定为「当前项目」收藏、不弹作用域选择，而**菜单/工具栏/右键菜单等入口**弹「作用域+列表」选择（1.7.2 起）；「隐藏 PhpStorm 原生书签界面」开关只控制原生 Bookmarks 工具窗口与残余原生动作的显隐
 - **多入口支持**：编辑器右键、行号区右键、项目视图右键、编辑器标签页右键、导航栏右键均有"收藏"子菜单；子菜单首位为「收藏文件夹/收藏文件」直捷动作（文案按选中类型动态显示：收藏文件夹/收藏文件/收藏，行为与"添加收藏"的文件上下文一致：弹「作用域+分组」选择、记住上次、多选批量一次、已收藏切换移除）；「导入原生书签」已收编为顶层动作，不再出现在右键子菜单（入口：收藏工具窗口工具栏按钮与「查找操作 Ctrl+Shift+A」）
 - **旧数据迁移**：升级后旧 favorites.xml 中无列表信息的收藏自动归入默认列表，不丢数据
@@ -289,6 +290,14 @@
 - 刷新：工具栏「全部折叠」后新增「刷新」（`AllIcons.Actions.Refresh`）——`RefreshQueue` 异步刷新各收藏路径 VFS（不在 EDT 阻塞），回调回 EDT 调 `BookmarksTree.refreshFromDisk` 清空 VFS 兜底缓存并重建树（保留展开记忆与过滤词，项目 disposal 防护）；文件夹收藏/真实目录右键新增「刷新此目录」——异步刷新该目录后原位重新懒加载子项并恢复展开态，目录缺失/不可解析时退化为整树重建
 - 重命名别名：原「编辑描述」改名为「重命名别名」（工具栏/F2/右键菜单），右键项经 `Interactions.renameAlias(item)` 直接作用于右键点中的收藏；别名（`Bookmark.description`）立即可见——文件/文件夹收藏主文本显示别名、行收藏灰色文本为「别名 · 行内容」、渲染器 tooltip 显示原名/路径/别名，`toString` 同时保留别名与原名参与速度搜索；留空即清除别名恢复默认显示，排序/过滤/跳转/共享只读等既有逻辑不变
 - 菜单入口统一列表选择：`DelegateToFavoritesAction` 区分调用来源——新增 `isKeyboardShortcutInvocation(place, inputEvent)`（`KeyEvent` 或 `ActionPlaces.KEYBOARD_SHORTCUT` 命中即快捷键），只有键盘快捷键（F11/Ctrl+F11）走 `performWithFixedScope(..., PROJECT)`；菜单/工具栏/右键菜单/查找操作等改走普通 `target.actionPerformed`，弹「项目/共享/全局及各自列表」选择；Ctrl+点击行号区手势仍固定当前项目作用域
+
+### ✅ v1.7.3：导入收藏路径宏解析与打开失败提示（已完成）
+
+- 路径宏展开工具 `helper/BookmarkPathMacros`：`candidates(rawPath, projectBasePath)` 产出按优先级排序去重的候选路径——① 宏全部展开（`$PROJECT_DIR$` / `$APPLICATION_CONFIG_DIR$` / `$APPLICATION_SYSTEM_DIR$` / `$APPLICATION_HOME_DIR$` / `$USER_HOME$`，带不带尾随 `$`、大小写不敏感，未知宏走 `PathMacroManager` 兜底）→ ② 宏不在开头时从第一个宏位置截断再展开（修复「项目根 + 未展开宏」混拼的历史坏数据）→ ③ 原样归一；只做字符串换算，平台 API 全部包在 `runCatching` 里，无 IDE 运行时也可安全调用
+- 导入期归一：`NativeBookmarkXmlParser` 导入时即展开宏并做项目内外路径归约，新导入数据直接是可用绝对路径
+- 打开期修复：新增共享解析器 `helper/BookmarkFileResolver.findExistingFile(path, project, absolute)`（宏展开候选 → 逐候选查 VFS → 每候选绝对路径一次同步刷新兜底，read/write action 内不刷新），收藏树 `BookmarksTree`、快速访问弹窗 `BookmarkPopup`、助记符跳转 `JumpToMnemonicBookmarkAction` 三处统一复用，不再各写一套；收藏树的「VFS 未收录路径只尝试一次」防抖语义保留（抽到解析器内，整树刷新/刷新此目录仍可重置）
+- 打开失败不再静默：新增 `helper/BookmarkOpenNotifier` 统一发非模态 WARNING 通知（标题「无法打开收藏」，内容=名称/原始路径/已尝试候选，候选最多 3 条、单条超 120 字符截断）+ 日志；数据库控制台收藏（路径尾部 `consoles/<id>/console.sql`）另有兜底：在 `PathManager.getConfigPath()/consoles` 下按 `<id>/console.sql` 做有限深度/有限条目的后台查找，命中即打开
+- 渲染器图标同源：`BookmarksTreeCellRenderer` 图标解析改用同一候选列表（只查 VFS 缓存，不刷新，避免渲染期触盘）
 
 ## 项目结构
 

@@ -1,5 +1,6 @@
 package com.aogg.favorites.ui
 
+import com.aogg.favorites.helper.BookmarkPathMacros
 import com.aogg.favorites.helper.BookmarkRefreshHelper
 import com.aogg.favorites.action.AddActionSupport
 import com.aogg.favorites.model.Bookmark
@@ -333,23 +334,35 @@ class BookmarksToolWindowPanel(private val project: Project) : JPanel(BorderLayo
     }
 
     /**
-     * 收藏路径 → 存在的虚拟文件（绝对路径直用；项目相对路径拼项目根；正斜杠规范后查 VFS 缓存）
+     * 收藏路径 → 存在的虚拟文件（1.7.3 起支持路径宏展开：候选逐个换算绝对路径后查 VFS 缓存；
+     * 绝对路径直用，项目相对路径拼项目根）。此处只查缓存不触盘刷新——调用方把刷新交给 [RefreshQueue] 异步完成
      *
-     * @param path 收藏路径（项目作用域相对 / 共享与全局作用域绝对）
-     * @return 虚拟文件；路径为空、无项目根或 VFS 未收录时返回 null
+     * @param path 收藏路径（项目作用域相对 / 共享与全局作用域绝对；可含未展开的 IDE 路径宏）
+     * @return 虚拟文件；路径为空、无项目根或全部候选都未收录时返回 null
      */
     private fun resolveFavoriteVirtualFile(path: String): VirtualFile? {
         // ////////////////  校验参数  start  ///////////////////////////////////////////
         if (path.isBlank()) return null
         // ////////////////  校验参数  end  /////////////////////////////////////////////
 
-        // ////////////////  核心逻辑：换算绝对路径后查 VFS 缓存  start  ///////////////////
-        val absolutePath = when {
-            File(path).isAbsolute -> path
-            else -> project.basePath?.let { File(it, path).absolutePath } ?: return null
+        // ////////////////  准备数据：项目根 + 宏展开候选 + VFS  start  //////////////////
+        val basePath = project.basePath
+        val localFileSystem = LocalFileSystem.getInstance()
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：逐候选换算绝对路径后查 VFS 缓存  start  /////////////
+        for (candidate in BookmarkPathMacros.candidates(path, basePath)) {
+            // 候选自身是绝对路径（宏已展开成绝对路径）时按绝对路径直用
+            val absolutePath = when {
+                FavoritesTreePaths.isAbsolutePath(candidate) -> candidate
+                basePath != null -> File(basePath, candidate).absolutePath
+                else -> continue
+            }
+            // findFileByPath 需正斜杠风格路径
+            val file = localFileSystem.findFileByPath(absolutePath.replace('\\', '/'))
+            if (file != null && file.isValid) return file
         }
-        return LocalFileSystem.getInstance().findFileByPath(absolutePath.replace('\\', '/'))
-            ?.takeIf { it.isValid }
+        return null
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
