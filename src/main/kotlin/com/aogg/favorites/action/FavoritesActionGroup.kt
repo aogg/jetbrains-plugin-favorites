@@ -1,5 +1,6 @@
 package com.aogg.favorites.action
 
+import com.aogg.favorites.helper.FavoritesActionTexts
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.actionSystem.DefaultActionGroup
@@ -17,6 +18,13 @@ import com.intellij.openapi.vfs.VirtualFile
  *   （行号区=EDITOR 非空；项目视图/标签页/导航栏=文件集合非空，单文件上下文回退 VIRTUAL_FILE）；
  *   上下文不适用时整组隐藏，不留灰色幽灵项；
  * - 子项自身的可见性仍由各子项 update 负责（如行号区隐藏「收藏文件夹/收藏文件」直捷项）。
+ *
+ * 1.8.0 两点变化：
+ * - 组不再挂到编辑器正文右键（EditorPopupMenu）与行号区右键（EditorGutterPopupMenu）——这两个位置
+ *   原生 F11 / Ctrl+F11 已被接管为一级菜单项「添加收藏」「添加助记收藏」，子菜单纯属重复；
+ *   仍挂 项目视图 / 编辑器标签页 / 导航栏 右键（要收藏文件/文件夹走这三处）；
+ * - 组标题文案按「隐藏原生书签界面」开关动态加「（Favorites）」后缀（见 [FavoritesActionTexts]），
+ *   与同屏出现的原生「书签」组区分；菜单每次打开都会 update，切换设置后无需重启。
  */
 class FavoritesActionGroup : DefaultActionGroup() {
 
@@ -40,6 +48,10 @@ class FavoritesActionGroup : DefaultActionGroup() {
         // ////////////////  核心逻辑：编辑器上下文或文件集合非空才显示，其余上下文整组隐藏  start
         e.presentation.isEnabledAndVisible = editor != null || files.isNotEmpty()
         // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  文案动态：组标题按「隐藏原生书签界面」开关加插件名后缀（1.8.0）  start
+        e.presentation.text = FavoritesActionTexts.of(BASE_TEXT)
+        // ////////////////  文案动态  end  /////////////////////////////////////////////
     }
 
     /**
@@ -55,5 +67,11 @@ class FavoritesActionGroup : DefaultActionGroup() {
         val single = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return VirtualFile.EMPTY_ARRAY
         return arrayOf(single)
         // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    companion object {
+
+        /** 组标题 base 文案（是否加「（Favorites）」后缀由 FavoritesActionTexts 决定） */
+        private const val BASE_TEXT = "收藏"
     }
 }

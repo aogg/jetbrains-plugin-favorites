@@ -18,7 +18,8 @@
 - **导入原生书签**：一键导入 PhpStorm 原生书签（运行时 API + .idea XML 容错解析双通道，自动去重、增量合并，助记符随迁）
 - **收藏路径宏解析与打开失败提示（1.7.3）**：原生书签导入的收藏支持展开 `$APPLICATION_CONFIG_DIR$` / `$USER_HOME$` / `$PROJECT_DIR$` 等 IDE 路径宏（导入期展开 + 项目内外路径归约）；历史遗留的未展开宏路径（如 `file://$APPLICATION_CONFIG_DIR$/consoles/xxx/console.sql`）在打开时按候选路径自动修复解析，收藏树、快速访问弹窗、助记符跳转三个入口共用同一套「宏展开候选 → 逐候选查 VFS → 每路径一次刷新兜底」解析器；打开失败从静默返回改为明确提示——日志 + 非模态 WARNING 通知（收藏名/原始路径/已尝试候选，超长与条数自动截断），数据库控制台收藏另有按控制台 id 在 IDE 配置目录 `consoles` 下兜底查找
 - **原生书签快捷键接管**：F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 与 Ctrl+点击行号区/图标区手势**始终**由本插件接管（与设置开关无关）；其中**键盘快捷键与 Ctrl+点击手势**固定为「当前项目」收藏、不弹作用域选择，而**菜单/工具栏/右键菜单等入口**弹「作用域+列表」选择（1.7.2 起）；「隐藏 PhpStorm 原生书签界面」开关只控制原生 Bookmarks 工具窗口与残余原生动作的显隐
-- **多入口支持**：编辑器右键、行号区右键、项目视图右键、编辑器标签页右键、导航栏右键均有"收藏"子菜单；子菜单首位为「收藏文件夹/收藏文件」直捷动作（文案按选中类型动态显示：收藏文件夹/收藏文件/收藏，行为与"添加收藏"的文件上下文一致：弹「作用域+分组」选择、记住上次、多选批量一次、已收藏切换移除）；「导入原生书签」已收编为顶层动作，不再出现在右键子菜单（入口：收藏工具窗口工具栏按钮与「查找操作 Ctrl+Shift+A」）
+- **多入口支持**：**编辑器正文右键与行号区右键（1.8.0 起）不再挂「收藏」二级菜单**——这两处的原生 `F11`/`Ctrl+F11` 已被接管为一级菜单项「添加收藏」「添加助记收藏」，子菜单纯属重复；**项目视图右键、编辑器标签页右键、导航栏右键**仍保留「收藏」子菜单，子菜单首位为「收藏文件夹/收藏文件」直捷动作（文案按选中类型动态显示：收藏文件夹/收藏文件/收藏，行为与"添加收藏"的文件上下文一致：弹「作用域+分组」选择、记住上次、多选批量一次、已收藏切换移除）；「导入原生书签」已收编为顶层动作，不再出现在右键子菜单（入口：收藏工具窗口工具栏按钮与「查找操作 Ctrl+Shift+A」）
+- **菜单显示名按开关区分 + 助记符行图标（1.8.0）**：未开启「隐藏 PhpStorm 原生书签界面」时，插件所有菜单项/被接管原生动作项的显示名自动追加「（Favorites）」后缀（如「添加收藏（Favorites）」「收藏（Favorites） >」），与同屏出现的原生「书签」项区分；开启隐藏（默认）时保持短名。后缀按每次菜单打开实时计算，切换设置无需重启。助记符收藏在行号区改为「书签 + 字符」复合图标（0-9/A-Z 各自可见，按字符缓存、HiDPI 清晰），点击图标即跳转到收藏行（文件已打开只定位不重复开 tab，解析失败发提示通知），tooltip 补「点击图标跳转」并列出同一行的全部收藏（项目 → 共享 → 全局）
 - **旧数据迁移**：升级后旧 favorites.xml 中无列表信息的收藏自动归入默认列表，不丢数据
 
 ## 使用说明
@@ -80,7 +81,8 @@
 | 添加/移除助记收藏（编辑器上下文） | `Ctrl+Alt+Shift+F11` |
 | 显示/隐藏收藏工具窗口 | `Alt+2` |
 | 显示收藏弹出列表 | `Ctrl+Alt+Shift+B` |
-| 跳转到助记符收藏 [0-9, A-Z] | `Ctrl+Alt+0-9` / `Ctrl+Alt+A-Z` |
+| 跳转到助记符收藏 [0-9]（原生 `GotoBookmark0-9` 键位，接管后照旧） | `Ctrl+0-9` |
+| 跳转到助记符收藏 [0-9, A-Z]（插件自带键位） | `Ctrl+Alt+0-9` / `Ctrl+Alt+A-Z` |
 | 工具窗口内：跳转 | `Enter` / 双击 |
 | 工具窗口内：重命名别名 | `F2` |
 | 工具窗口内：删除 | `Del` |
@@ -93,7 +95,8 @@
 > | `Ctrl+F11` | `ToggleBookmarkWithMnemonic` | 当前项目助记符收藏（不弹作用域选择，写入上次分组） |
 > | `Shift+F11` | `ShowBookmarks` | 收藏弹出列表 |
 > | `Alt+2` | `ActivateBookmarksToolWindow` | 收藏工具窗口开关 |
-> | `Ctrl+0-9`（存在时含 `Ctrl+A-Z`） | `GotoBookmark0-9`（`GotoBookmarkA-Z`） | 跳转到对应助记符收藏 |
+> | `Ctrl+0-9` | `GotoBookmark0-9` | 跳转到对应助记符收藏（数字系列原生默认键位存在，接管后照旧生效） |
+> | `Ctrl+A-Z`（**无**原生默认键位） | `GotoBookmarkA-Z` | 覆盖动作 id 后本插件 `Favorites.JumpToMnemonic.A-Z` 接管；字母跳转请用 `Ctrl+Alt+A-Z`（原生字母系列在 2023.3 只有动作 id、没有默认键位，故不占用 `Ctrl+A-Z`） |
 > | `Ctrl+点击` 行号区/图标区（Mac 为 ⌘+点击） | ——（原生为硬编码鼠标手势，非动作；1.5.0 起经 `EditorMouseListener` 在 mousePressed 消费接管） | 当前项目匿名收藏切换（点击行，不弹作用域选择） |
 >
 > 快捷键与手势**始终归本插件接管**，不受任何设置开关影响；"隐藏 PhpStorm 原生书签界面"开关**只控制原生书签界面的显隐**——
@@ -125,12 +128,36 @@
 - **默认开启**；`Settings → Tools → Favorites` 取消勾选"隐藏 PhpStorm 原生书签界面"并 Apply —— 残余原生动作、动作组与工具窗口立即恢复显示
 - 隐藏为尽力而为：任何一步失败仅记录日志，不影响插件其它功能
 
+#### 隐藏 / 不隐藏 原生书签界面：显示对照表（1.8.0）
+
+> 同一套插件功能，在「隐藏原生书签界面」两种设置下的**全部入口显示形态**。
+> 规则：**开启隐藏（默认）= 插件项用短名**；**关闭隐藏 = 插件项名称追加「（Favorites）」后缀**（`FavoritesActionTexts`，
+> 每次菜单打开/查找操作刷新时按当前设置即时计算，切换设置无需重启）。动作 id、快捷键、菜单顺序均不受影响。
+
+| 位置 / 场景 | 隐藏原生书签界面 = ☑ 开（默认） | 隐藏原生书签界面 = ☐ 关 |
+|---|---|---|
+| **编辑器正文右键**（`EditorPopupMenu`） | 只有一级项「添加收藏」「添加助记收藏」（原生 `F11`/`Ctrl+F11` 的接管项）；**无「收藏 >」二级菜单**（1.8.0 起移除；原生书签在正文右键本就没有动作组） | 同上，但显示为「添加收藏（Favorites）」「添加助记收藏（Favorites）」；仍无「收藏 >」二级菜单 |
+| **行号区右键**（`EditorGutterPopupMenu`） | 一级项「添加收藏」「添加助记收藏」；**无「收藏 >」二级菜单**（1.8.0 起移除）；原生平铺书签组 `popup@BookmarkContextMenu`（添加书签/编辑书签/切换书签/删除助记符/按助记符切换）被隐藏 | 一级项变为「添加收藏（Favorites）」「添加助记收藏（Favorites）」；原生平铺「书签」组同时出现（原生项用原名） |
+| **项目视图右键**（`ProjectViewPopupMenu`） | 「收藏 >」子菜单（收藏文件夹/收藏文件、添加收藏、添加助记收藏，均短名）+ 一级接管项；原生「书签」弹出组 `popup@ExpandableBookmarkContextMenu` 被隐藏 | 「收藏（Favorites） >」子菜单（三项文案均带后缀）+ 原生「书签」弹出组（添加书签/编辑书签/切换书签）同屏 |
+| **编辑器标签页右键**（`EditorTabPopupMenu`） | 同项目视图：保留「收藏 >」子菜单 + 一级接管项；原生「书签」弹出组被隐藏 | 同项目视图：「收藏（Favorites） >」+ 原生「书签」弹出组同屏 |
+| **导航栏右键**（`NavbarPopupMenu`，文件路径导航条） | 「收藏 >」子菜单（三项短名）；原生导航栏本就没有书签组 | 「收藏（Favorites） >」子菜单（三项带后缀） |
+| **查找操作**（`Ctrl+Shift+A`） | 插件动作短名：添加收藏 / 添加助记收藏 / 收藏 / 跳转到收藏 [X] / 显示收藏列表 / 显示/隐藏收藏工具窗口 / 导入原生书签；被接管的原生 id（`ToggleBookmark`、`ToggleBookmarkWithMnemonic`、`ShowBookmarks`、`ActivateBookmarksToolWindow`、`GotoBookmark0-9/A-Z`）显示为对应的插件短名；残余原生 `ToggleBookmark0-9/A-Z`、`ShowTypeBookmarks` 不出现（已隐藏） | 插件项与全部接管项显示为「…（Favorites）」；残余原生动作恢复为原生名（如「切换书签 0」）并可搜索 |
+| **主菜单** | 无书签菜单项：PhpStorm 2023.3 的原生 `Bookmarks` 动作组未挂任何菜单（本次已在 `lib/app-client.jar!idea/LangActions.xml` 核实），插件本身也无主菜单入口（插件仍 best-effort 隐藏该组，防御第三方主题/插件挂载） | 同上（无书签菜单项） |
+| **快捷键** | `F11`=添加收藏、`Ctrl+F11`=添加助记收藏、`Shift+F11`=显示收藏列表、`Alt+2`=收藏工具窗口、`Ctrl+0-9`=跳转助记符收藏、`Ctrl+Alt+0-9/A-Z`=插件自带跳转；原生 `Ctrl+Shift+0-9`（`ToggleBookmark0-9`）、`Ctrl+Shift+F11`（`ShowTypeBookmarks`）因动作隐藏而不可用 | 上述插件键位归属**完全不变**（接管与开关无关）；另外原生 `Ctrl+Shift+0-9`、`Ctrl+Shift+F11` 恢复原生「按助记符切换/弹出」行为 |
+| **行号区图标（gutter）** | 匿名收藏 = 原生书签图标；助记符收藏 = 「书签 + 字符」复合图标（1.8.0，0-9/A-Z 各自可见）；点击图标跳转到收藏行，tooltip 列出同一行全部收藏并提示「点击图标跳转」 | 同上：插件 gutter 图标与点击跳转不受该开关影响（原生自己的书签 gutter 图标可能与插件图标同时出现） |
+
+> 备注：`Ctrl+0-9` 的跳转键位来自原生 `GotoBookmark0-9`（`keymaps/$default.xml` 里 `control 0`…`control 9`），
+> 因为接管是「换动作实现、保留动作 id」，所以键位天然延续；原生字母系列 `GotoBookmarkA-Z` 在 2023.3 只有动作 id、
+> 没有默认键位，故字母跳转仍用插件自带的 `Ctrl+Alt+A-Z`（不占用 `Ctrl+A-Z`，避免与编辑器快捷键冲突）。
+
 ### 入口与场景
 
-- **编辑器 / 行号区（Gutter）/ 项目视图 / 编辑器标签页 / 导航栏右键**：
+- **编辑器正文右键 / 行号区（Gutter）右键（1.8.0 起）**：不再挂「收藏」二级菜单——这两处原生 `F11`/`Ctrl+F11` 已被接管为一级菜单项「添加收藏」「添加助记收藏」，子菜单纯属重复；要收藏文件/文件夹请走项目视图 / 编辑器标签页 / 导航栏右键
+- **项目视图 / 编辑器标签页 / 导航栏右键**：
   - 均有"收藏"子菜单（菜单置底），内含"收藏文件夹/收藏文件（直捷动作，文案按选中类型动态）/ 添加收藏 / 添加助记收藏"；上下文不适用时（如项目视图空白处右键）整组隐藏
   - 编辑器上下文 → 行收藏；项目视图/标签页/导航栏 → 文件/文件夹收藏；无有效上下文时菜单项自动隐藏
   - 这些**菜单入口**（以及被接管的原生书签菜单项）都会弹「作用域+分组（项目/共享/全局及各自列表）」选择；只有键盘快捷键与 Ctrl+点击手势不弹（1.7.2）
+  - 未隐藏原生书签界面时，子菜单标题与项名自动带「（Favorites）」后缀（1.8.0，见上方显示对照表）
 - **项目视图（Project Tool Window）**：支持多选批量收藏；右键目录/文件后从被接管的原生书签菜单触发「添加收藏/添加助记收藏」时同样弹「作用域+分组」选择
 - **收藏工具窗口 `Favorites`**（默认停靠在左侧）：
   - 作用域 → 列表 → 文件系统树（上级目录链/文件/行收藏/文件夹懒加载），作用域节点显示总数徽标，如 `项目收藏 (12)`
@@ -298,6 +325,15 @@
 - 打开期修复：新增共享解析器 `helper/BookmarkFileResolver.findExistingFile(path, project, absolute)`（宏展开候选 → 逐候选查 VFS → 每候选绝对路径一次同步刷新兜底，read/write action 内不刷新），收藏树 `BookmarksTree`、快速访问弹窗 `BookmarkPopup`、助记符跳转 `JumpToMnemonicBookmarkAction` 三处统一复用，不再各写一套；收藏树的「VFS 未收录路径只尝试一次」防抖语义保留（抽到解析器内，整树刷新/刷新此目录仍可重置）
 - 打开失败不再静默：新增 `helper/BookmarkOpenNotifier` 统一发非模态 WARNING 通知（标题「无法打开收藏」，内容=名称/原始路径/已尝试候选，候选最多 3 条、单条超 120 字符截断）+ 日志；数据库控制台收藏（路径尾部 `consoles/<id>/console.sql`）另有兜底：在 `PathManager.getConfigPath()/consoles` 下按 `<id>/console.sql` 做有限深度/有限条目的后台查找，命中即打开
 - 渲染器图标同源：`BookmarksTreeCellRenderer` 图标解析改用同一候选列表（只查 VFS 缓存，不刷新，避免渲染期触盘）
+
+### ✅ v1.8.0：助记符行图标与菜单显示重整（已完成）
+
+- 菜单去重：`plugin.xml` 的 `Favorites.Group` 移除 `EditorPopupMenu`（编辑器正文右键）与 `EditorGutterPopupMenu`（行号区右键）两条 `add-to-group`——这两处原生 `ToggleBookmark`(F11) / `ToggleBookmarkWithMnemonic`(Ctrl+F11) 已被 `NativeBookmarkActionIntegration` 接管为一级菜单项，子菜单里的同名项纯属重复（用户反馈的截图问题）；项目视图 / 编辑器标签页 / 导航栏右键的子菜单保留，动作定义、快捷键、菜单顺序均未改动
+- 显示名矩阵：新增 `helper/FavoritesActionTexts`（`PLUGIN_SUFFIX="（Favorites）"`、`nativeBookmarksHidden()`、`of(base)` / `of(base, nativeBookmarksHidden)`）；各动作在 `update(e)` 里用 `e.presentation.text = FavoritesActionTexts.of(base)` 动态设置（菜单每次打开都会 `update`，切换设置即时生效，无需重启），覆盖 添加收藏 / 添加助记收藏 / 收藏(文件夹/文件) / 收藏组标题 / 跳转到收藏 [X] / 显示收藏列表 / 显示隐藏收藏工具窗口 / 导入原生书签，以及 `DelegateToFavoritesAction`（构造参数改为 base 文案，`templatePresentation` 只放 base，`update` 时按设置加后缀；`replaceWithDelegate` 从转发目标动作文本取 base、取不到用原生 id 兜底）
+- 助记符行图标：`BookmarkIconHelper.getMnemonicIcon` 从「所有助记符都返回同一个原生书签图标」改为复合图标 `MnemonicBookmarkIcon`（书签底图 + 居中字符、白字 + 上下左右 1px 深色描边、按字符 `ConcurrentHashMap` 缓存、`Graphics.create()/dispose()` 配对、抗锯齿/文字抗锯齿保证 HiDPI 清晰），匿名收藏仍用原生书签图标
+- 行号区点击跳转：`BookmarkGutterHelper.navigateToBookmark` 补全（原为空实现）——`invokeLater` 回 EDT → `BookmarkFileResolver.findExistingFile` 解析（路径宏候选 + VFS 兜底）→ `FileEditorManager.openFile`（已打开只激活不重复开 tab）→ 按文件精确取 `TextEditor` → caret 移到收藏行（0 基越界保护）→ `scrollToCaret(CENTER)` → `requestFocus`；解析失败走 `BookmarkOpenNotifier` 的「无法打开收藏」通知（与收藏树一致，不再静默）
+- tooltip 增强：首行「助记符收藏 [X]（点击图标跳转）+ 文件/行号」，同一行存在多条收藏（项目/共享/全局）时逐条列出并标记「← 图标」；图标仍优先助记符收藏（优先级 项目 → 共享 → 全局）
+- 快捷键核实：PhpStorm 2023.3 的原生 `GotoBookmark0-9` / `GotoBookmarkA-Z` **动作 id 全部存在**（`lib/app-client.jar!idea/LangActions.xml`），且 `keymaps/$default.xml` 只给数字系列绑了 `control 0`…`control 9`（字母系列无默认键位）——因此 `Ctrl+0-9` 在接管后照旧可用、本次无需新增键位，字母系列继续用插件自带 `Ctrl+Alt+A-Z`；「添加助记收藏」后经 `BookmarkRefreshHelper.refreshAfterChange` → `DaemonCodeAnalyzer.restart()` 立即重绘 gutter 图标
 
 ## 项目结构
 

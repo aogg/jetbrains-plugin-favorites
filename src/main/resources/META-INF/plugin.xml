@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.favorites</id>
     <name>Favorites</name>
-    <version>1.7.3</version>
+    <version>1.8.0</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -15,6 +15,9 @@
     - 收藏管理工具窗口：PhpStorm 风格树状视图（上级目录树/文件夹懒加载展开/行收藏挂文件节点/按文件类型图标）、实时过滤、排序、快速跳转
     - 收藏树交互（1.7.2）：右键「项目视图操作」子菜单（平台项目视图动作直接作用于右键目标）、工具栏与目录右键刷新、
       重命名别名并让别名在树中立即可见
+    - 菜单与行号图标（1.8.0）：编辑器正文右键/行号区右键不再重复挂「收藏」二级菜单（原生 F11/Ctrl+F11 已接管为一级项）；
+      未隐藏原生书签界面时插件菜单项名称自动加「（Favorites）」后缀以示区分；助记符收藏在行号区显示带字符的书签图标，
+      点击图标即可跳转
     - 快速访问：弹出窗口快速跳转到收藏位置
     - 导入原生书签：一键导入 PhpStorm 原生书签（运行时 API + .idea XML 容错解析，自动去重与增量合并）
     - 原生书签快捷键接管：F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 与 Ctrl+点击行号区/图标区手势始终由本插件接管
@@ -24,6 +27,22 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.8.0 - 助记符行图标与菜单显示重整
+    - 编辑器正文右键、行号区右键移除重复的「收藏」二级菜单：这两处原生 ToggleBookmark(F11) /
+      ToggleBookmarkWithMnemonic(Ctrl+F11) 已被接管为一级菜单项，子菜单里的同名项纯属重复；
+      项目视图 / 编辑器标签页 / 导航栏右键的子菜单保留（动作定义、快捷键、菜单顺序均未改动）
+    - 菜单显示名按「隐藏 PhpStorm 原生书签界面」开关区分（FavoritesActionTexts）：
+      开启（默认）用短名「添加收藏」；关闭时加后缀「添加收藏（Favorites）」，避免与同屏出现的原生
+      「书签」菜单项混淆。覆盖 添加收藏/添加助记收藏/收藏(文件夹/文件)/收藏组标题/跳转到收藏[X]/
+      显示收藏列表/显示隐藏收藏工具窗口/导入原生书签 与被接管的原生动作委托项（F11/Ctrl+F11/Shift+F11/
+      Alt+2/Ctrl+0-9 等）；文案在每次菜单打开时按当前设置即时刷新，切换设置无需重启
+    - 行号区助记符图标改为「书签 + 字符」复合图标（0-9/A-Z 各自可见，按字符缓存，HiDPI 下清晰、
+      深浅主题都有白字深描边），匿名收藏仍用普通书签图标
+    - 行号区图标支持点击跳转：打开文件并把 caret 移到收藏行（居中滚动 + 聚焦），文件已打开时只定位不重复开 tab；
+      解析失败发非模态 WARNING 通知（与收藏树一致，不再静默）；tooltip 补「点击跳转」并在同一行存在多条收藏时
+      全部列出（项目 → 共享 → 全局），图标仍优先显示助记符收藏
+    - 快捷键：PhpStorm 2023.3 自带 GotoBookmark0-9 默认键位（Ctrl+0-9）继续在接管后生效，助记符跳转无需新增键位
+
     1.7.2 - 收藏树交互增强（项目视图操作 / 刷新 / 重命名别名 / 列表选择）
     - 收藏树右键新增「项目视图操作」子菜单：收藏文件、文件夹收藏以及文件夹收藏展开出的真实目录/文件，
       右键直接取平台 ProjectViewPopupMenu 动作组子项（新建/删除/重命名/复制粘贴/同步/版本控制等），
@@ -314,14 +333,18 @@
     </extensions>
 
     <actions>
-        <!-- 收藏子菜单：编辑器右键 / 行号区右键 / 项目视图右键 / 编辑器标签页右键 / 导航栏右键，均置底；
+        <!-- 收藏子菜单（1.8.0 起只挂 项目视图 / 编辑器标签页 / 导航栏 三处右键，均置底）。
+             已移除 EditorPopupMenu（编辑器正文右键）与 EditorGutterPopupMenu（行号区右键）的挂载：
+             这两个位置的原生 ToggleBookmark(F11) / ToggleBookmarkWithMnemonic(Ctrl+F11) 早已被本插件
+             接管为一级菜单项「添加收藏」「添加助记收藏」，子菜单里的同名项纯属重复（用户反馈的二级菜单重复）；
+             这两个位置要收藏文件/文件夹请走 项目视图 / 编辑器标签页 / 导航栏 右键。
              class=FavoritesActionGroup 按上下文控制整组显隐（无编辑器且无选中文件时整组隐藏，不留灰色幽灵项）；
+             组标题文案由 FavoritesActionTexts 按「隐藏原生书签界面」开关动态加后缀（1.8.0），
+             XML 里只写 base 文案「收藏」；
              图标用收藏工具窗口语义图标（2023.3 存在 AllIcons.Toolwindows.ToolWindowFavorites） -->
         <group id="Favorites.Group" class="com.aogg.favorites.action.FavoritesActionGroup"
                text="收藏" description="Favorites 收藏菜单"
                icon="AllIcons.Toolwindows.ToolWindowFavorites" popup="true">
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-            <add-to-group group-id="EditorGutterPopupMenu" anchor="last"/>
             <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
             <!-- 导航栏（文件路径导航条，平台 LangActions.xml 自带 NavbarPopupMenu 组）右键；

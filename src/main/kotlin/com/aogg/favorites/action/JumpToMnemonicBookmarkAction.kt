@@ -3,6 +3,7 @@ package com.aogg.favorites.action
 import com.aogg.favorites.helper.BookmarkFileResolver
 import com.aogg.favorites.helper.BookmarkOpenNotifier
 import com.aogg.favorites.helper.BookmarkPathMacros
+import com.aogg.favorites.helper.FavoritesActionTexts
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.model.BookmarkType
 import com.intellij.openapi.actionSystem.AnAction
@@ -70,8 +71,8 @@ class JumpToMnemonicBookmarkAction : AnAction() {
             ?: com.aogg.favorites.model.GlobalBookmarkManager.getInstance().getBookmarkByMnemonic(mnemonic)
         e.presentation.isEnabled = bookmark != null
 
-        // 更新显示文本
-        e.presentation.text = "跳转到收藏 [$mnemonic]"
+        // 更新显示文本（1.8.0：未隐藏原生书签界面时追加「（Favorites）」后缀，菜单打开即刷新）
+        e.presentation.text = FavoritesActionTexts.of("跳转到收藏 [$mnemonic]")
     }
 
     /**

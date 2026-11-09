@@ -1,5 +1,6 @@
 package com.aogg.favorites.nativebookmarks
 
+import com.aogg.favorites.helper.FavoritesActionTexts
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -24,5 +25,12 @@ class ImportNativeBookmarksAction : AnAction(
 
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabledAndVisible = e.getData(CommonDataKeys.PROJECT) != null
+        // 1.8.0 菜单/查找操作文案：短名 / 短名+插件名后缀（按「隐藏原生书签界面」设置实时切换）
+        e.presentation.text = FavoritesActionTexts.of(BASE_TEXT)
+    }
+
+    companion object {
+        /** 菜单 base 文案（是否加「（Favorites）」后缀由 FavoritesActionTexts 决定） */
+        private const val BASE_TEXT = "导入原生书签"
     }
 }

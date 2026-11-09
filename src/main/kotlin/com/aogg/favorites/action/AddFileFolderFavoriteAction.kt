@@ -1,5 +1,6 @@
 package com.aogg.favorites.action
 
+import com.aogg.favorites.helper.FavoritesActionTexts
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -12,7 +13,8 @@ import com.intellij.openapi.vfs.VirtualFile
  * - 复用 [AddAnonymousBookmarkAction] 的项目上下文流程（弹「作用域+分组」分组树、
  *   默认记住上次选择、多选批量只弹一次、已收藏则切换移除），行为与其文件上下文完全一致；
  * - 菜单文案按选中类型动态显示：全部是文件夹→「收藏文件夹」；全部是文件（单/多选）→「收藏文件」；
- *   文件夹+文件混合多选→「收藏」。
+ *   文件夹+文件混合多选→「收藏」；
+ * - 1.8.0：文案再按「隐藏原生书签界面」开关决定是否追加「（Favorites）」后缀（见 [FavoritesActionTexts]）。
  */
 class AddFileFolderFavoriteAction : AnAction("收藏", DESCRIPTION, null) {
 
@@ -45,8 +47,9 @@ class AddFileFolderFavoriteAction : AnAction("收藏", DESCRIPTION, null) {
         // ////////////////  可见性  end  /////////////////////////////////////////////////
 
         // ////////////////  文案动态：按选中类型显示 收藏文件夹/收藏文件/收藏  start  ////////
+        // 1.8.0：base 文案再按「隐藏原生书签界面」开关决定是否追加「（Favorites）」后缀（菜单打开即刷新）
+        e.presentation.text = FavoritesActionTexts.of(if (files.isNotEmpty()) presentationText(files) else BASE_TEXT)
         if (files.isNotEmpty()) {
-            e.presentation.text = presentationText(files)
             e.presentation.description = DESCRIPTION
         }
         // ////////////////  文案动态  end  ///////////////////////////////////////////////
@@ -73,6 +76,9 @@ class AddFileFolderFavoriteAction : AnAction("收藏", DESCRIPTION, null) {
     }
 
     companion object {
+
+        /** 菜单 base 文案（无选中/混合多选；是否加「（Favorites）」后缀由 FavoritesActionTexts 决定） */
+        private const val BASE_TEXT = "收藏"
 
         /** 动作描述：中文说明会弹出「作用域+分组」选择（供菜单 tooltip / 查找操作展示） */
         private const val DESCRIPTION =

@@ -1,6 +1,7 @@
 package com.aogg.favorites.action
 
 import com.aogg.favorites.helper.BookmarkRefreshHelper
+import com.aogg.favorites.helper.FavoritesActionTexts
 import com.aogg.favorites.model.Bookmark
 import com.aogg.favorites.model.BookmarkType
 import com.aogg.favorites.model.FavoriteScope
@@ -260,6 +261,9 @@ class AddAnonymousBookmarkAction : AnAction("添加收藏", "添加收藏", null
     /**
      * 按上下文启用：编辑器→行收藏；项目视图/标签页→文件/文件夹收藏。
      * 无有效上下文时隐藏，避免灰色无效项常驻。
+     *
+     * 1.8.0：菜单文案按「隐藏原生书签界面」开关实时计算（隐藏=开 用短名，关闭时加「（Favorites）」后缀），
+     * 菜单每次打开都会走 update，所以切换设置后无需重启即生效。
      */
     override fun update(e: AnActionEvent) {
         val project = e.project
@@ -267,9 +271,14 @@ class AddAnonymousBookmarkAction : AnAction("添加收藏", "添加收藏", null
             (e.getData(CommonDataKeys.EDITOR) != null ||
                 !e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY).isNullOrEmpty())
         e.presentation.isEnabledAndVisible = hasContext
+        // 1.8.0 菜单文案：短名 / 短名+插件名后缀（按设置实时切换）
+        e.presentation.text = FavoritesActionTexts.of(BASE_TEXT)
     }
 
     companion object {
+
+        /** 菜单 base 文案（是否加「（Favorites）」后缀由 FavoritesActionTexts 决定） */
+        private const val BASE_TEXT = "添加收藏"
 
         private val log = Logger.getInstance(AddAnonymousBookmarkAction::class.java)
 

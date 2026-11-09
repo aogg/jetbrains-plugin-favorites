@@ -1,6 +1,7 @@
 package com.aogg.favorites.nativebookmarks
 
 import com.aogg.favorites.action.ScopedAddAction
+import com.aogg.favorites.helper.FavoritesActionTexts
 import com.aogg.favorites.model.FavoriteScope
 import com.aogg.favorites.settings.FavoritesSettings
 import com.intellij.openapi.actionSystem.ActionManager
@@ -141,19 +142,25 @@ internal fun isKeyboardShortcutInvocation(place: String?, inputEvent: InputEvent
  *
  * @param nativeActionId 被接管的原生动作 id（仅用于展示文案兜底）
  * @param favoritesActionId 转发目标的 Favorites 动作 id
- * @param text 菜单/键位编辑器中的显示文案
+ * @param baseText 菜单/键位编辑器中的 base 文案（1.8.0：转发目标的 base 文案，取不到时用原生动作 id 兜底；
+ *   是否追加「（Favorites）」插件名后缀由 [FavoritesActionTexts] 按「隐藏原生书签界面」开关在 update 时决定）
  * @param fixedScope 非空时“键盘快捷键调用”按该固定作用域执行（转发目标需实现 [ScopedAddAction]）；
  *   菜单/工具栏等非快捷键调用不受影响，照常弹选择
  */
 class DelegateToFavoritesAction(
     private val nativeActionId: String,
     private val favoritesActionId: String,
-    text: String?,
+    baseText: String?,
     private val fixedScope: FavoriteScope? = null
 ) : AnAction() {
 
+    /** 生效的 base 文案（构造参数为空/空白时回退原生动作 id，保证菜单不会没有文案） */
+    private val baseText: String = baseText?.takeIf { it.isNotBlank() } ?: nativeActionId
+
     init {
-        templatePresentation.text = text?.takeIf { it.isNotBlank() } ?: nativeActionId
+        // templatePresentation 只放 base 文案：工具窗口/键位编辑器等非菜单入口不需要后缀；
+        // 菜单/查找操作的显示名由 update() 按当前设置实时追加后缀（切换设置后无需重启）
+        templatePresentation.text = this.baseText
         templatePresentation.description = "由 Favorites 插件接管（原动作：$nativeActionId）"
     }
 
@@ -187,6 +194,8 @@ class DelegateToFavoritesAction(
 
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabled = e.project != null
+        // 1.8.0 委托项文案：跟随转发目标的 base 文案，并按「隐藏原生书签界面」开关追加「（Favorites）」后缀
+        e.presentation.text = FavoritesActionTexts.of(baseText)
     }
 
     companion object {
@@ -365,7 +374,8 @@ object NativeBookmarkActionIntegration {
             val delegate = DelegateToFavoritesAction(
                 nativeActionId = nativeActionId,
                 favoritesActionId = spec.favoritesActionId,
-                text = favoritesAction?.templatePresentation?.text,
+                // base 文案取转发目标动作的文本（如「添加收藏」「跳转到收藏 [3]」），取不到时由构造器回退原生动作 id
+                baseText = favoritesAction?.templatePresentation?.text,
                 fixedScope = spec.fixedScope
             )
             originals.putOriginal(nativeActionId, current)
