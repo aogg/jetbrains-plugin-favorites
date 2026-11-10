@@ -555,6 +555,9 @@ class BookmarksTree(
         /** 本插件自己的「收藏」右键组 id（平台项目视图菜单里也有，子菜单中需排除避免自我嵌套） */
         private const val FAVORITES_ACTION_GROUP_ID = "Favorites.Group"
 
+        /** 「添加收藏」动作 id（项目视图/导航栏右键同款，收藏树文件/文件夹右键首项复用，三作用域通用） */
+        private const val ADD_FAVORITE_ACTION_ID = "Favorites.AddFavorite"
+
         /**
          * 平台项目视图菜单中需排除的动作组 id（1.7.2）：
          * - `popup@ExpandableBookmarkContextMenu`：平台项目视图右键的原生「书签」弹出组
@@ -1416,9 +1419,11 @@ class BookmarksTree(
     }
 
     /**
-     * 右键菜单（列表操作按选中上下文的作用域执行；未收藏真实节点仅提供跳转，收藏类操作不可用；
+     * 右键菜单（列表操作按选中上下文的作用域执行；未收藏真实节点提供跳转+添加收藏，其余收藏类操作不可用；
      * 规则匹配子树提供独立菜单：规则根=新建/全刷、规则=刷新/编辑/启禁/删除、条目=跳转/查看详情；
-     * 作用域根/列表分组节点（项目/全局）首项=添加目录…，弹平台目录选择器后写入收藏）
+     * 作用域根/列表分组节点（项目/全局）首项=添加目录…，弹平台目录选择器后写入收藏；
+     * 右键文件/文件夹（收藏本体/懒加载真实子项）首项=添加收藏：平台同款动作，弹「作用域+分组」选择、
+     * 已收藏切换移除，项目/共享/全局三作用域通用）
      */
     private fun showPopupMenu(e: MouseEvent) {
         val path = getPathForLocation(e.x, e.y) ?: return
@@ -1519,6 +1524,19 @@ class BookmarksTree(
         }
         // ////////////////  添加目录…  end  ///////////////////////////////////////////
 
+        // ////////////////  添加收藏：右键文件/文件夹首项入口（三作用域通用）  start  ////////
+        // 目标=收藏文件/文件夹收藏/真实目录/懒加载未收藏真实子项时，复用平台注册的项目视图同款
+        // 动作（Favorites.AddFavorite）：弹「作用域+分组」选择（记住上次选择）、已收藏则切换移除，
+        // 目标经下方弹窗注入的 DataContext（VIRTUAL_FILE(_ARRAY)=右键节点）取得，与项目视图右键
+        // 行为/文案完全一致；项目/共享/全局三作用域下均可用。动作取不到时跳过该项，不影响其余菜单
+        if (clickedTargetFile != null) {
+            runCatching { ActionManager.getInstance().getAction(ADD_FAVORITE_ACTION_ID) }
+                .onFailure { log.warn("获取动作 $ADD_FAVORITE_ACTION_ID 失败（收藏树右键不显示添加收藏入口）", it) }
+                .getOrNull()
+                ?.let { group.add(it) }
+        }
+        // ////////////////  添加收藏  end  ////////////////////////////////////////////
+
         if (selectedBookmarks.isNotEmpty()) {
             group.add(object : AnAction("跳转", "跳转到收藏位置", null) {
                 override fun actionPerformed(e: AnActionEvent) {
@@ -1540,7 +1558,7 @@ class BookmarksTree(
             group.add(buildMoveToListGroup(selectedBookmarks))
             group.add(Separator.getInstance())
         } else {
-            // ////////////////  未收藏真实/容器节点：仅提供跳转  start  ///////////////////
+            // ////////////////  未收藏真实/容器节点：仅提供跳转（添加收藏由上方统一注入）  start  ///
             val userObject = (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject
             if (userObject is RealFileNode || userObject is FileNode || userObject is DirNode) {
                 group.add(object : AnAction("跳转", "打开文件或在 Project 视图中选中目录", null) {
