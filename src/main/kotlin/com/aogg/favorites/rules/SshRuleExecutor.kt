@@ -19,8 +19,26 @@ import com.intellij.openapi.project.Project
  *
  * 输出说明：v1 走本机 ssh 命令，仅支持密钥/agent 认证（BatchMode 禁用任何交互提示），
  * 不支持交互式密码登录；远程命令多行文本整体作为单个 ssh 参数下发。
+ *
+ * 1.8.1 重构：主机解析/命令行组装/进程执行抽成 [resolveTarget]/[buildSshCommandLine]/[runSshCommand]
+ * 公共通道，供远程文件夹/远程文件执行器（SshDirRuleExecutor）复用同一套 ssh 行为。
  */
 class SshRuleExecutor : RuleExecutor {
+
+    /**
+     * SSH 连接目标（别名解析或手填归一后的主机/端口/用户名）
+     *
+     * @param host 主机地址
+     * @param port 端口
+     * @param user 登录用户名（空串=不带 user@ 前缀）
+     */
+    data class SshTarget(val host: String, val port: Int, val user: String) {
+
+        /**
+         * user@host 形式的目标描述（错误信息与日志统一用）
+         */
+        fun userHost(): String = if (user.isEmpty()) host else "$user@$host"
+    }
 
     companion object {
         /** 单次执行结果条数硬上限（与 RegexRuleExecutor 一致） */
@@ -99,6 +117,92 @@ class SshRuleExecutor : RuleExecutor {
             return if (result.length < trimmed.length) "…$result" else result.toString()
             // ////////////////  返回  end  ///////////////////////////////////////////////
         }
+
+        /**
+         * 解析规则里的 SSH 连接目标（1.8.1 从 execute() 抽出，供 SSH 系执行器共用）：
+         * 别名通道查 [SshConfigReader.listHosts]，手填通道取 sshManualHost/Port/User；
+         * 解析不出主机抛 IllegalArgumentException（message 面向用户）
+         *
+         * @param project 项目
+         * @param rule 规则
+         * @return 连接目标
+         */
+        @JvmStatic
+        fun resolveTarget(project: Project, rule: MatchRule): SshTarget {
+            // ////////////////  主机解析：别名通道 / 手填通道  start  /////////////////////////
+            val alias = rule.sshHostAlias.trim()
+            if (alias.isNotEmpty()) {
+                val entry = SshConfigReader.listHosts(project).firstOrNull { it.alias == alias }
+                    ?: throw IllegalArgumentException(
+                        "SSH 主机 $alias 不存在，请检查 IDE SSH 配置或 ~/.ssh/config"
+                    )
+                return SshTarget(entry.hostName, entry.port, entry.user)
+            }
+            val host = rule.sshManualHost.trim()
+            if (host.isEmpty()) {
+                throw IllegalArgumentException("SSH 主机为空，请编辑规则选择别名或填写主机")
+            }
+            return SshTarget(host, rule.sshManualPort, rule.sshManualUser.trim())
+            // ////////////////  主机解析  end  ///////////////////////////////////////////
+        }
+
+        /**
+         * 组装本机 ssh 命令行（1.8.1 从 execute() 抽出）：BatchMode（禁用交互）+ ConnectTimeout
+         * + accept-new，非默认端口追加 -p，命令整体作为单个参数下发
+         *
+         * @param target 连接目标
+         * @param command 远端命令文本
+         * @return 命令行
+         */
+        @JvmStatic
+        fun buildSshCommandLine(target: SshTarget, command: String): GeneralCommandLine {
+            // ////////////////  组装命令行：ssh [opts] [-p port] [user@]host command  start  //
+            val commandLine = GeneralCommandLine("ssh")
+            commandLine.addParameters("-o", "BatchMode=yes")
+            commandLine.addParameters("-o", "ConnectTimeout=8")
+            commandLine.addParameters("-o", "StrictHostKeyChecking=accept-new")
+            if (target.port in 1..65535 && target.port != DEFAULT_PORT) {
+                commandLine.addParameters("-p", target.port.toString())
+            }
+            commandLine.addParameter(target.userHost())
+            commandLine.addParameter(command)
+            return commandLine
+            // ////////////////  组装命令行  end  /////////////////////////////////////////
+        }
+
+        /**
+         * 执行 ssh 命令并拿输出（1.8.1 从 execute() 抽出，供 SSH 系执行器共用）：
+         * 进程启动失败/超时/退出码非 0 统一抛 IllegalStateException，message 携带目标与
+         * stderr 尾部（[tailForMessage] 截断），便于树节点 tooltip 与测试弹窗展示原因
+         *
+         * @param target 连接目标
+         * @param command 远端命令文本
+         * @param timeoutMs 整体超时（毫秒）
+         * @return 进程输出（退出码必为 0）
+         */
+        @JvmStatic
+        fun runSshCommand(target: SshTarget, command: String, timeoutMs: Int = SSH_TIMEOUT_MS): ProcessOutput {
+            // ////////////////  核心逻辑：进程启动失败兜底  start  ///////////////////////////
+            val commandLine = buildSshCommandLine(target, command)
+            val output = runCatching { ExecUtil.execAndGetOutput(commandLine, timeoutMs) }.getOrElse { error ->
+                log.warn("SSH 执行进程异常（${target.userHost()}）", error)
+                throw IllegalStateException(
+                    "SSH 执行失败（${target.userHost()}）：${tailForMessage(error.message ?: error.javaClass.simpleName)}",
+                    error
+                )
+            }
+            // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+
+            // ////////////////  逻辑后：退出码非 0（含超时）统一抛错  start  ///////////////////
+            if (output.exitCode != 0) {
+                val timeoutHint = if (output.isTimeout) "（连接或命令超时）" else ""
+                throw IllegalStateException(
+                    "SSH 命令退出码 ${output.exitCode}$timeoutHint（${target.userHost()}）：${tailForMessage(output.stderr)}"
+                )
+            }
+            return output
+            // ////////////////  逻辑后  end  /////////////////////////////////////////////
+        }
     }
 
     override fun execute(project: Project, rule: MatchRule): List<RuleItem> {
@@ -110,56 +214,9 @@ class SshRuleExecutor : RuleExecutor {
         val limit = rule.limit.coerceIn(1, MAX_RESULT_LIMIT)
         // ////////////////  校验参数  end  ////////////////////////////////////////////
 
-        // ////////////////  主机解析：别名通道 / 手填通道  start  /////////////////////////
-        val alias = rule.sshHostAlias.trim()
-        val host: String
-        val port: Int
-        val user: String
-        if (alias.isNotEmpty()) {
-            val entry = SshConfigReader.listHosts(project).firstOrNull { it.alias == alias }
-                ?: throw IllegalArgumentException(
-                    "SSH 主机 $alias 不存在，请检查 IDE SSH 配置或 ~/.ssh/config"
-                )
-            host = entry.hostName
-            port = entry.port
-            user = entry.user
-        } else {
-            host = rule.sshManualHost.trim()
-            port = rule.sshManualPort
-            user = rule.sshManualUser.trim()
-        }
-        if (host.isEmpty()) {
-            throw IllegalArgumentException("SSH 主机为空，请编辑规则选择别名或填写主机")
-        }
-        // ////////////////  主机解析  end  ///////////////////////////////////////////
-
-        // ////////////////  组装命令行：ssh [opts] [-p port] [user@]host command  start  ////
-        val commandLine = GeneralCommandLine("ssh")
-        commandLine.addParameters("-o", "BatchMode=yes")
-        commandLine.addParameters("-o", "ConnectTimeout=8")
-        commandLine.addParameters("-o", "StrictHostKeyChecking=accept-new")
-        if (port in 1..65535 && port != DEFAULT_PORT) {
-            commandLine.addParameters("-p", port.toString())
-        }
-        commandLine.addParameter(if (user.isEmpty()) host else "$user@$host")
-        commandLine.addParameter(command)
-        // ////////////////  组装命令行  end  /////////////////////////////////////////
-
-        // ////////////////  核心逻辑：执行 + 输出整形/失败抛错  start  /////////////////////
-        val target = if (user.isEmpty()) host else "$user@$host"
-        val output = runCatching { ExecUtil.execAndGetOutput(commandLine, SSH_TIMEOUT_MS) }.getOrElse { error ->
-            log.warn("SSH 规则执行进程异常（$target）", error)
-            throw IllegalStateException(
-                "SSH 执行失败（$target）：${tailForMessage(error.message ?: error.javaClass.simpleName)}",
-                error
-            )
-        }
-        if (output.exitCode != 0) {
-            val timeoutHint = if (output.isTimeout) "（连接或命令超时）" else ""
-            throw IllegalStateException(
-                "SSH 命令退出码 ${output.exitCode}$timeoutHint（$target）：${tailForMessage(output.stderr)}"
-            )
-        }
+        // ////////////////  核心逻辑：公共通道解析主机并执行，stdout 按行整形  start  /////////
+        val target = resolveTarget(project, rule)
+        val output = runSshCommand(target, command)
         return processOutput(output.stdout, limit).map { RuleItem.LineItem(it) }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }

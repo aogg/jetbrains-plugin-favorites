@@ -1,9 +1,10 @@
 package com.aogg.favorites.model
 
 /**
- * 规则类型（1.4.0 规则匹配）
+ * 规则类型（1.4.0 规则匹配，1.8.1 新增远程文件夹/远程文件两类）
  *
- * 三类执行器均已实现并注册（REGEX=RegexRuleExecutor；SQL=SqlRuleExecutor；SSH=SshRuleExecutor）。
+ * 各类执行器均已实现并注册（REGEX=RegexRuleExecutor；SQL=SqlRuleExecutor；
+ * SSH=SshRuleExecutor；SSH_DIR/SSH_FILE=SshDirRuleExecutor）。
  */
 enum class RuleType(val label: String) {
 
@@ -20,7 +21,17 @@ enum class RuleType(val label: String) {
     /**
      * SSH 命令：本机 ssh 命令执行远程命令取 stdout
      */
-    SSH("SSH 命令");
+    SSH("SSH 命令"),
+
+    /**
+     * 远程文件夹：收藏远端一个目录，树里像本地收藏文件夹一样展开浏览（ssh ls 懒加载）
+     */
+    SSH_DIR("远程文件夹"),
+
+    /**
+     * 远程文件：收藏远端一个文件，树里可查看内容（ssh cat 只读展示）
+     */
+    SSH_FILE("远程文件");
 }
 
 /**
@@ -80,6 +91,8 @@ enum class RegexTarget(val label: String) {
  * @param sshManualPort SSH：手动端口
  * @param sshManualUser SSH：手动用户名
  * @param sshCommand SSH：待执行命令
+ * @param sshRemotePath SSH_DIR/SSH_FILE：远端路径（'/' 分隔，如 /var/www/app；SSH_DIR=目录，
+ *   SSH_FILE=文件；1.8.1 新增）
  * @param limit 结果条数上限（1..10000，各类执行器通用）
  */
 data class MatchRule(
@@ -106,5 +119,6 @@ data class MatchRule(
     val sshManualPort: Int = 22,
     val sshManualUser: String = "",
     val sshCommand: String = "",
+    val sshRemotePath: String = "",
     val limit: Int = 500
 )

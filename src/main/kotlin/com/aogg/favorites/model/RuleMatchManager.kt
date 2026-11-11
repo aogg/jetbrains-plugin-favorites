@@ -3,9 +3,11 @@ package com.aogg.favorites.model
 import com.aogg.favorites.helper.RuleStorageHelper
 import com.aogg.favorites.rules.RegexRuleExecutor
 import com.aogg.favorites.rules.RuleExecutor
+import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleResult
 import com.aogg.favorites.rules.RuleStatus
 import com.aogg.favorites.rules.SqlRuleExecutor
+import com.aogg.favorites.rules.SshDirRuleExecutor
 import com.aogg.favorites.rules.SshRuleExecutor
 import com.aogg.favorites.ui.BookmarksToolWindowPanel
 import com.intellij.openapi.application.ApplicationManager
@@ -22,10 +24,13 @@ import java.util.concurrent.ConcurrentHashMap
  * - 结果缓存：Map<ruleId, [RuleResult]>（ConcurrentHashMap，EDT 渲染与后台执行并发读写安全）；
  * - 刷新：[refreshRule] 单规则后台执行，[refreshAll] 对启用规则并行刷新
  *   （未注册执行器的类型兜底置 ERROR「执行器待实现」）；
- * - 执行状态变化后统一 invokeLater 刷新收藏工具窗口（项目已关闭则跳过）。
+ * - 执行状态变化后统一 invokeLater 刷新收藏工具窗口（项目已关闭则跳过）；
+ * - 远端目录缓存（1.8.1 远程文件夹/远程文件新增）：Map<"ruleId|路径", 条目列表>，收藏树懒加载
+ *   展开远端目录时先查缓存、命中不重复拉取（「已拉取的存客户端缓存、异步逐项刷新、不全量拉取」），
+ *   规则增删改时清空对应规则缓存。
  *
  * 线程约定：CRUD 仅约定在 EDT 调用（与既有管理器风格一致）；refreshRule/refreshAll 幂等，
- * 内部自行切后台线程。
+ * 内部自行切后台线程；listRemoteDirAsync/readRemoteFileAsync 亦内部切后台线程、回调回 EDT。
  */
 @Service(Service.Level.PROJECT)
 class RuleMatchManager(private val project: Project) {
@@ -33,8 +38,13 @@ class RuleMatchManager(private val project: Project) {
     companion object {
         private val log = Logger.getInstance(RuleMatchManager::class.java)
 
-        /** 无执行器类型的统一失败文案（兜底分支，当前三类执行器均已注册） */
+        /** 无执行器类型的统一失败文案（兜底分支，当前五类执行器均已注册） */
         private const val EXECUTOR_NOT_IMPLEMENTED = "执行器待实现"
+
+        /**
+         * 远端目录缓存键：ruleId|远端路径（路径已归一；`|` 不会出现在规则 id 与归一路径里）
+         */
+        private fun remoteDirKey(ruleId: String, path: String): String = "$ruleId|$path"
 
         /**
          * 获取项目实例
@@ -45,11 +55,13 @@ class RuleMatchManager(private val project: Project) {
         }
     }
 
-    /** 执行器注册表（按规则类型路由；三类执行器 init 注册，新类型可经 [registerExecutor] 扩展） */
+    /** 执行器注册表（按规则类型路由；五类执行器 init 注册，新类型可经 [registerExecutor] 扩展） */
     private val executors = ConcurrentHashMap<RuleType, RuleExecutor>().apply {
         put(RuleType.REGEX, RegexRuleExecutor())
         put(RuleType.SQL, SqlRuleExecutor())
         put(RuleType.SSH, SshRuleExecutor())
+        put(RuleType.SSH_DIR, SshDirRuleExecutor())
+        put(RuleType.SSH_FILE, SshDirRuleExecutor())
     }
 
     /** 规则结果缓存（ruleId → 最近一次执行结果） */
@@ -57,6 +69,9 @@ class RuleMatchManager(private val project: Project) {
 
     /** 正在后台执行的规则 id 集合（防重复提交，LOADING 期间重复刷新被忽略） */
     private val refreshingRules: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** 远端目录子项缓存（"ruleId|路径" → 条目列表；懒加载命中不重复 ssh ls） */
+    private val remoteDirCache = ConcurrentHashMap<String, List<RuleItem.RemoteFileItem>>()
 
     // ==================== 执行器注册（供新类型执行器扩展） ====================
 
@@ -99,18 +114,20 @@ class RuleMatchManager(private val project: Project) {
     }
 
     /**
-     * 更新规则（按 id 覆盖；不触发执行）
+     * 更新规则（按 id 覆盖；不触发执行；远端目录缓存一并清除，避免旧主机/旧路径脏数据）
      */
     fun updateRule(rule: MatchRule) {
         mutateRules { list -> list.map { if (it.id == rule.id) rule else it } }
+        clearRemoteCacheForRule(rule.id)
     }
 
     /**
-     * 删除规则（同时清除其结果缓存）
+     * 删除规则（同时清除其结果缓存与远端目录缓存）
      */
     fun removeRule(ruleId: String) {
         mutateRules { list -> list.filterNot { it.id == ruleId } }
         resultCache.remove(ruleId)
+        clearRemoteCacheForRule(ruleId)
     }
 
     /**
@@ -207,6 +224,121 @@ class RuleMatchManager(private val project: Project) {
     fun refreshAll() {
         if (project.isDisposed) return
         getRules().filter { it.enabled }.forEach { refreshRule(it.id) }
+    }
+
+    // ==================== 远端目录缓存与懒加载（1.8.1 SSH_DIR/SSH_FILE） ====================
+
+    /**
+     * 读缓存的远端目录子项（懒加载命中不重复 ssh ls；未拉取过返回 null）
+     *
+     * @param ruleId 所属规则 id
+     * @param path 远端目录路径（已归一）
+     */
+    fun cachedRemoteDirChildren(ruleId: String, path: String): List<RuleItem.RemoteFileItem>? {
+        return remoteDirCache[remoteDirKey(ruleId, path)]
+    }
+
+    /**
+     * 失效远端目录缓存（树「刷新此目录」入口）：
+     * 移除该目录自身与全部子级目录的缓存（按 key 前缀匹配 `路径/`），下次展开重新 ssh ls
+     *
+     * @param ruleId 所属规则 id
+     * @param path 远端目录路径（已归一）
+     */
+    fun invalidateRemoteDirCache(ruleId: String, path: String) {
+        val prefix = remoteDirKey(ruleId, path) + "/"
+        remoteDirCache.keys.removeIf { key -> key == remoteDirKey(ruleId, path) || key.startsWith(prefix) }
+    }
+
+    /**
+     * 异步列远端目录（收藏树懒加载展开入口）：
+     * 调用线程快照规则 → 后台线程走 [SshDirRuleExecutor.listRemoteDir]（ssh ls）→
+     * 结果写入 [remoteDirCache] → 回调回 EDT（Result 含失败原因）；项目已关闭/规则不存在不回调。
+     * 同一 (ruleId, path) 加载中重复调用被忽略（回调收 Result.failure("加载中") 不触发 UI 重复刷新）。
+     *
+     * @param ruleId 所属规则 id
+     * @param path 远端目录路径（内部归一）
+     * @param callback EDT 回调：成功=子条目列表；失败=异常（message 面向用户）
+     */
+    fun listRemoteDirAsync(
+        ruleId: String,
+        path: String,
+        callback: (Result<List<RuleItem.RemoteFileItem>>) -> Unit
+    ) {
+        // ////////////////  校验参数：项目未关闭 + 规则存在 + 未在加载中  start  ////////////////
+        if (project.isDisposed) return
+        val rule = getRule(ruleId) ?: return
+        if (rule.type != RuleType.SSH_DIR && rule.type != RuleType.SSH_FILE) return
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：后台 ssh ls + 缓存 + EDT 回调  start  /////////////////
+        runCatching {
+            AppExecutorUtil.getAppExecutorService().submit {
+                // SshDirRuleExecutor 的列目录/读文件走 companion 纯通道（不经执行器实例）
+                val result = runCatching { SshDirRuleExecutor.listRemoteDir(project, rule, path) }
+                if (result.isSuccess) {
+                    remoteDirCache[remoteDirKey(ruleId, SshDirRuleExecutor.normalizeRemotePath(path))] =
+                        result.getOrDefault(emptyList())
+                }
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    callback(result)
+                }
+            }
+        }.onFailure { error ->
+            // 提交失败兜底：回调失败原因，避免树侧一直停在加载占位
+            log.warn("远端目录列取任务提交失败：$path", error)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                callback(Result.failure(error))
+            }
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 异步读取远端文件内容（收藏树「查看内容」入口）：
+     * 后台线程走 [SshDirRuleExecutor.readRemoteFile]（ssh head 限量拉取，不落项目内文件）→
+     * 回调回 EDT；项目已关闭/规则不存在不回调
+     *
+     * @param ruleId 所属规则 id
+     * @param path 远端文件路径
+     * @param callback EDT 回调：成功=文件文本；失败=异常（message 面向用户）
+     */
+    fun readRemoteFileAsync(ruleId: String, path: String, callback: (Result<String>) -> Unit) {
+        // ////////////////  校验参数：项目未关闭 + 规则存在  start  /////////////////////////
+        if (project.isDisposed) return
+        val rule = getRule(ruleId) ?: return
+        if (rule.type != RuleType.SSH_DIR && rule.type != RuleType.SSH_FILE) return
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：后台 ssh head + EDT 回调  start  //////////////////////
+        runCatching {
+            AppExecutorUtil.getAppExecutorService().submit {
+                val result = runCatching { SshDirRuleExecutor.readRemoteFile(project, rule, path) }
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    callback(result)
+                }
+            }
+        }.onFailure { error ->
+            log.warn("远端文件读取任务提交失败：$path", error)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                callback(Result.failure(error))
+            }
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 清除某规则的全部远端目录缓存（规则增删改时调用，防止换主机/换路径后命中旧缓存）
+     *
+     * @param ruleId 规则 id
+     */
+    private fun clearRemoteCacheForRule(ruleId: String) {
+        val prefix = "$ruleId|"
+        remoteDirCache.keys.removeIf { key -> key.startsWith(prefix) }
     }
 
     /**

@@ -62,6 +62,8 @@ class RuleStorageHelper : PersistentStateComponent<RuleStorageHelper.State> {
         var sshManualPort: Int = 22,
         var sshManualUser: String = "",
         var sshCommand: String = "",
+        // SSH_DIR/SSH_FILE：远端路径（1.8.1 新增；旧 XML 缺字段反序列化走默认空串）
+        var sshRemotePath: String = "",
         var limit: Int = 500
     ) {
         constructor() : this("", "", RuleType.REGEX.name, true, 0L)
@@ -92,6 +94,7 @@ class RuleStorageHelper : PersistentStateComponent<RuleStorageHelper.State> {
                 sshManualPort = sshManualPort,
                 sshManualUser = sshManualUser,
                 sshCommand = sshCommand,
+                sshRemotePath = sshRemotePath,
                 limit = limit
             )
         }
@@ -121,6 +124,7 @@ class RuleStorageHelper : PersistentStateComponent<RuleStorageHelper.State> {
                     sshManualPort = rule.sshManualPort,
                     sshManualUser = rule.sshManualUser,
                     sshCommand = rule.sshCommand,
+                    sshRemotePath = rule.sshRemotePath,
                     limit = rule.limit
                 )
             }

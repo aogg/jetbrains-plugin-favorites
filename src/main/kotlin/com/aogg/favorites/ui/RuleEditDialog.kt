@@ -9,6 +9,7 @@ import com.aogg.favorites.rules.RegexRuleMatcher
 import com.aogg.favorites.rules.RuleExecutor
 import com.aogg.favorites.rules.SqlRuleExecutor
 import com.aogg.favorites.rules.SshConfigReader
+import com.aogg.favorites.rules.SshDirRuleExecutor
 import com.aogg.favorites.rules.SshRuleExecutor
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
@@ -43,7 +44,7 @@ import javax.swing.ScrollPaneConstants
 /**
  * 规则类型下拉项（data class：与下拉模型条目值相等，选中回退可命中）
  *
- * @param type 规则类型（REGEX/SQL/SSH 三类执行器均已注册，均可选）
+ * @param type 规则类型（REGEX/SQL/SSH/SSH_DIR/SSH_FILE 各执行器均已注册，均可选）
  */
 private data class RuleTypeItem(val type: RuleType) {
     override fun toString(): String = type.label
@@ -75,17 +76,23 @@ private data class SshModeItem(val useExistingConfig: Boolean) {
 }
 
 /**
- * 规则编辑对话框（新建与编辑共用，1.4.0）：
- * - 类型下拉 REGEX/SQL/SSH 切换三块真实表单；
+ * 规则编辑对话框（新建与编辑共用，1.4.0；1.8.1 新增远程文件夹/远程文件类型）：
+ * - 类型下拉 REGEX/SQL/SSH/SSH_DIR/SSH_FILE 切换表单（SSH 系三类共用一张主机来源表单卡片，
+ *   按类型切换下方负载行：SSH=远程命令多行；SSH_DIR/SSH_FILE=远程路径 + 浏览…）；
  * - REGEX 表单：名称、根目录（空=整项目，带提示）、正则（多行）、匹配目标下拉、忽略大小写、上限；
  * - SQL 表单：连接方式（IDE 数据源=数据源名下拉，后台异步读取、读失败给提示可手输 /
  *   手动连接=JDBC URL、用户名、密码）+ SQL 多行 + 路径列(可选) + 上限；
- * - SSH 表单：主机来源（现有 SSH 配置=别名下拉，后台异步读取、读失败给提示可手输 /
- *   手动填写=主机、端口、用户名）+ 远程命令多行 + 上限；
+ * - SSH 系表单：主机来源（现有 SSH 配置=别名下拉，后台异步读取、读失败给提示可手输 /
+ *   手动填写=主机、端口、用户名）+ 远程命令/远程路径 + 上限；
+ *   SSH_DIR/SSH_FILE 的「浏览…」后台 ssh ls 列远端目录弹选择器选文件夹/文件
+ *   （[RemotePathChooserDialog]，失败给提示可手输绝对路径）；
+ * - 数据源/SSH 别名列表各自独立后台任务读取（1.8.1 修复：原先串在同一个任务里，数据源枚举
+ *   慢/阻塞会拖死 SSH 别名下拉，提示一直停在「正在读取…」），任何一方失败不影响另一方；
  * - 「测试」按钮：用当前表单值构造临时 MatchRule 直接调对应执行器（后台线程，不落结果缓存），
- *   完成弹「匹配到 N 条 / 查询到 N 行 / 输出 N 行」；执行期间按钮禁用；
+ *   完成弹「匹配到 N 条 / 查询到 N 行 / 输出 N 行 / 读取到 N 项」；执行期间按钮禁用；
  * - OK 校验：名称非空；按类型校验（SQL：数据源名或 JDBC URL 非空+SQL 非空；
- *   SSH：别名或手动主机非空+命令非空；上限 1..10000）；
+ *   SSH：别名或手动主机非空+命令非空；SSH_DIR/SSH_FILE：别名或手动主机非空+远程路径非空；
+ *   上限 1..10000）；
  * - 密码安全：手动连接密码经 PasswordSafe 存取（[RulePasswordStore]），对话框不回显已存值，
  *   编辑时留空=保留原密码（不覆盖），非空=覆盖写入；XML 永不落明文。
  *
@@ -102,6 +109,24 @@ class RuleEditDialog(
 
         /** 结果条数上限边界（与各执行器硬上限一致） */
         private const val MAX_RESULT_LIMIT = RegexRuleExecutor.MAX_RESULT_LIMIT
+
+        /** SSH 系（SSH/SSH_DIR/SSH_FILE）共用表单卡片的 card key */
+        private const val SSH_FAMILY_CARD_KEY = "SSH_FAMILY"
+
+        /** SSH 系负载行卡片 key：远程命令 */
+        private const val PAYLOAD_COMMAND_KEY = "COMMAND"
+
+        /** SSH 系负载行卡片 key：远程路径 */
+        private const val PAYLOAD_PATH_KEY = "PATH"
+
+        /**
+         * 规则类型 → 表单卡片 key：REGEX/SQL 各自独立卡片，SSH 系三类共用一张卡片
+         */
+        private fun cardKeyFor(type: RuleType): String = when (type) {
+            RuleType.REGEX -> RuleType.REGEX.name
+            RuleType.SQL -> RuleType.SQL.name
+            else -> SSH_FAMILY_CARD_KEY
+        }
     }
 
     /** 公共字段：名称 */
@@ -188,8 +213,17 @@ class RuleEditDialog(
     /** SSH 表单：手动用户名 */
     private val sshUserField = JBTextField()
 
+    /** SSH 表单：负载行卡片（远程命令 / 远程路径，按 SSH 系类型切换） */
+    private val sshPayloadLayout = CardLayout()
+
+    /** SSH 表单：负载行卡片容器 */
+    private val sshPayloadPanel = JPanel(sshPayloadLayout)
+
     /** SSH 表单：远程命令（多行） */
     private val sshArea = JBTextArea(6, 44)
+
+    /** SSH 表单：远程路径（SSH_DIR/SSH_FILE；远端绝对路径，可手输或「浏览…」选择） */
+    private val sshRemotePathField = JBTextField()
 
     /** SSH 表单：结果上限 */
     private val sshLimitSpinner = JBIntSpinner(
@@ -210,17 +244,24 @@ class RuleEditDialog(
     }
 
     init {
-        // ////////////////  类型下拉：三类均可选  start  //////////////////////////////////
+        // ////////////////  类型下拉：五类均可选  start  //////////////////////////////////
         typeCombo.model = DefaultComboBoxModel(
             arrayOf(
                 RuleTypeItem(RuleType.REGEX),
                 RuleTypeItem(RuleType.SQL),
-                RuleTypeItem(RuleType.SSH)
+                RuleTypeItem(RuleType.SSH),
+                RuleTypeItem(RuleType.SSH_DIR),
+                RuleTypeItem(RuleType.SSH_FILE)
             )
         )
         typeCombo.addActionListener {
             val item = typeCombo.selectedItem as? RuleTypeItem ?: return@addActionListener
-            cardLayout.show(cardPanel, item.type.name)
+            // SSH 系三类共用一张表单卡片；负载行按类型切换（SSH=远程命令；SSH_DIR/SSH_FILE=远程路径）
+            cardLayout.show(cardPanel, cardKeyFor(item.type))
+            sshPayloadLayout.show(
+                sshPayloadPanel,
+                if (item.type == RuleType.SSH) PAYLOAD_COMMAND_KEY else PAYLOAD_PATH_KEY
+            )
         }
         typeCombo.selectedItem = RuleTypeItem(RuleType.REGEX)
         // ////////////////  类型下拉  end  ////////////////////////////////////////////
@@ -296,7 +337,7 @@ class RuleEditDialog(
         // ////////////////  类型表单卡片  start  ///////////////////////////////////////
         cardPanel.add(buildRegexFormPanel(), RuleType.REGEX.name)
         cardPanel.add(buildSqlFormPanel(), RuleType.SQL.name)
-        cardPanel.add(buildSshFormPanel(), RuleType.SSH.name)
+        cardPanel.add(buildSshFamilyFormPanel(), SSH_FAMILY_CARD_KEY)
         constraints.gridx = 0
         constraints.gridy = 2
         constraints.gridwidth = 2
@@ -535,9 +576,11 @@ class RuleEditDialog(
     }
 
     /**
-     * SSH 表单：主机来源（现有 SSH 配置 / 手动填写）+ 远程命令多行 + 上限
+     * SSH 系表单（SSH/SSH_DIR/SSH_FILE 共用，1.8.1 改造）：
+     * 主机来源（现有 SSH 配置 / 手动填写）+ 负载行卡片（SSH=远程命令多行；
+     * SSH_DIR/SSH_FILE=远程路径 + 浏览…）+ 上限
      */
-    private fun buildSshFormPanel(): JComponent {
+    private fun buildSshFamilyFormPanel(): JComponent {
         val panel = JPanel(GridBagLayout())
         val constraints = GridBagConstraints().apply {
             insets = Insets(4, 10, 4, 10)
@@ -564,28 +607,23 @@ class RuleEditDialog(
         panel.add(sshCardPanel, constraints)
         constraints.gridwidth = 1
 
-        // 远程命令（多行）
-        sshArea.lineWrap = false
+        // 负载行卡片：SSH=远程命令多行；SSH_DIR/SSH_FILE=远程路径 + 浏览…
+        sshPayloadPanel.add(buildSshCommandPayload(), PAYLOAD_COMMAND_KEY)
+        sshPayloadPanel.add(buildSshRemotePathPayload(), PAYLOAD_PATH_KEY)
         constraints.gridx = 0
         constraints.gridy = 2
-        constraints.weightx = 0.0
-        panel.add(JBLabel("远程命令:"), constraints)
-        constraints.gridx = 1
-        constraints.weightx = 1.0
+        constraints.gridwidth = 2
         constraints.weighty = 1.0
         constraints.fill = GridBagConstraints.BOTH
-        panel.add(JScrollPane(
-            sshArea,
-            ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
-            ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
-        ), constraints)
+        panel.add(sshPayloadPanel, constraints)
+        constraints.gridwidth = 1
+        constraints.weighty = 0.0
+        constraints.fill = GridBagConstraints.HORIZONTAL
 
         // 输出说明 + 上限（同一行）
         constraints.gridy = 3
         constraints.gridx = 0
         constraints.weightx = 0.0
-        constraints.weighty = 0.0
-        constraints.fill = GridBagConstraints.HORIZONTAL
         panel.add(JBLabel("上限:"), constraints)
         constraints.gridx = 1
         constraints.weightx = 1.0
@@ -598,6 +636,77 @@ class RuleEditDialog(
         spinnerRow.add(sshLimitSpinner, BorderLayout.CENTER)
         limitRow.add(spinnerRow, BorderLayout.EAST)
         panel.add(limitRow, constraints)
+
+        return panel
+    }
+
+    /**
+     * 负载行卡片：远程命令（SSH 类型；多行文本整体作为单个 ssh 参数下发）
+     */
+    private fun buildSshCommandPayload(): JComponent {
+        val panel = JPanel(GridBagLayout())
+        val constraints = GridBagConstraints().apply {
+            insets = Insets(4, 0, 4, 0)
+            anchor = GridBagConstraints.WEST
+            fill = GridBagConstraints.HORIZONTAL
+            weightx = 1.0
+        }
+
+        // 远程命令（多行）
+        sshArea.lineWrap = false
+        constraints.gridx = 0
+        constraints.gridy = 0
+        constraints.weightx = 0.0
+        panel.add(JBLabel("远程命令:"), constraints)
+        constraints.gridx = 1
+        constraints.weightx = 1.0
+        constraints.weighty = 1.0
+        constraints.fill = GridBagConstraints.BOTH
+        panel.add(JScrollPane(
+            sshArea,
+            ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+            ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+        ), constraints)
+
+        return panel
+    }
+
+    /**
+     * 负载行卡片：远程路径（SSH_DIR/SSH_FILE 类型；可手输远端绝对路径或「浏览…」后台 ls 选择）
+     */
+    private fun buildSshRemotePathPayload(): JComponent {
+        val panel = JPanel(GridBagLayout())
+        val constraints = GridBagConstraints().apply {
+            insets = Insets(4, 0, 4, 0)
+            anchor = GridBagConstraints.WEST
+            fill = GridBagConstraints.HORIZONTAL
+            weightx = 1.0
+        }
+
+        // 远程路径 + 浏览…（同一行）
+        sshRemotePathField.emptyText.text = "远端路径，如 /var/www 或 /var/www/app；支持以 ~ 开头"
+        constraints.gridx = 0
+        constraints.gridy = 0
+        constraints.weightx = 0.0
+        panel.add(JBLabel("远程路径:"), constraints)
+        constraints.gridx = 1
+        constraints.weightx = 1.0
+        val pathRow = JPanel(BorderLayout(8, 0))
+        pathRow.add(sshRemotePathField, BorderLayout.CENTER)
+        val browseAction = object : AbstractAction("浏览…") {
+            override fun actionPerformed(e: java.awt.event.ActionEvent?) {
+                browseRemotePath()
+            }
+        }
+        pathRow.add(javax.swing.JButton(browseAction), BorderLayout.EAST)
+        panel.add(pathRow, constraints)
+
+        // 提示（灰色说明）
+        constraints.gridx = 1
+        constraints.gridy = 1
+        val pathHint = JBLabel("「浏览…」后台 ssh ls 列远端目录选择；失败可直接手输绝对路径")
+        pathHint.foreground = JBColor.GRAY
+        panel.add(pathHint, constraints)
 
         return panel
     }
@@ -692,27 +801,65 @@ class RuleEditDialog(
     // ==================== 后台读取数据源/SSH 别名列表 ====================
 
     /**
-     * 后台读取 IDE 数据源名与 SSH 别名列表（读 IDE 配置可能慢，不阻塞对话框打开）；
-     * 回来后 invokeLater 刷新下拉，保留用户已输入/已选值；读失败给空列表+提示文案
+     * 后台读取 IDE 数据源名与 SSH 别名列表（1.8.1 拆分入口）：
+     * 两者各自独立后台任务（数据源枚举可能因数据库插件类加载慢/阻塞，不能与 SSH 别名串行——
+     * 否则别名下拉永远等不到，提示停在「正在读取…」），各自完成后独立刷新各自下拉与提示，
+     * 任何一方失败/阻塞不影响另一方。
      */
     private fun scheduleOptionLoad() {
-        // ////////////////  核心逻辑：后台读取 + invokeLater 刷新  start  /////////////////
+        scheduleDatasourceLoad()
+        scheduleAliasLoad()
+    }
+
+    /**
+     * 后台任务一：读取 IDE 数据源名列表（读 IDE 配置可能慢，不阻塞对话框打开）；
+     * 回来后 invokeLater 独立刷新数据源下拉，保留用户已输入/已选值；读失败给空列表+提示文案
+     */
+    private fun scheduleDatasourceLoad() {
+        // ////////////////  核心逻辑：独立后台读取 + invokeLater 独立刷新  start  ///////////////
         val submitted = runCatching {
             AppExecutorUtil.getAppExecutorService().submit {
                 val datasourceNames = runCatching { SqlRuleExecutor.listIdeDatasourceNames(project) }
                     .onFailure { log.warn("读取 IDE 数据源列表失败", it) }
                     .getOrDefault(emptyList())
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    refreshDatasourceCombo(datasourceNames)
+                }
+            }
+        }
+        submitted.onFailure { log.warn("IDE 数据源列表读取任务提交失败", it) }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 后台任务二：读取 SSH 别名列表（与数据源任务互不影响）；
+     * 回来后 invokeLater 独立刷新别名下拉，保留用户已输入/已选值；读失败给空列表+明确原因提示，
+     * 不允许提示停在「正在读取…」不更新
+     */
+    private fun scheduleAliasLoad() {
+        // ////////////////  核心逻辑：独立后台读取 + invokeLater 独立刷新  start  ///////////////
+        val submitted = runCatching {
+            AppExecutorUtil.getAppExecutorService().submit {
                 val sshAliases = runCatching { SshConfigReader.listHosts(project).map { it.alias } }
                     .onFailure { log.warn("读取 SSH 配置列表失败", it) }
                     .getOrDefault(emptyList())
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
-                    refreshDatasourceCombo(datasourceNames)
                     refreshAliasCombo(sshAliases)
                 }
             }
         }
-        submitted.onFailure { log.warn("数据源/SSH 别名列表读取任务提交失败", it) }
+        submitted.onFailure {
+            // 提交失败也要终结「正在读取…」提示（明确原因），避免一直停留在读取中
+            log.warn("SSH 别名列表读取任务提交失败", it)
+            if (!project.isDisposed) {
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    sshAliasHint.text = "SSH 别名列表读取任务提交失败，可手输别名或改手动填写"
+                }
+            }
+        }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
@@ -742,7 +889,8 @@ class RuleEditDialog(
             aliasCombo.selectedItem = previous
         }
         sshAliasHint.text = if (aliases.isEmpty()) {
-            "未读取到 SSH 配置（IDE SSH 配置与 ~/.ssh/config 均为空或读取失败），可手输别名或改手动填写"
+            "未读取到 SSH 主机别名（IDE SSH 配置为空/读取失败，且 ~/.ssh/config 不存在或无 Host；" +
+                "已支持 Include 引用文件），可手输别名或改手动填写"
         } else {
             "已读取到 ${aliases.size} 个 SSH 主机别名"
         }
@@ -787,7 +935,7 @@ class RuleEditDialog(
                 pathColumnField.text = rule.sqlPathColumn
                 sqlLimitSpinner.number = rule.limit.coerceIn(1, MAX_RESULT_LIMIT)
             }
-            RuleType.SSH -> {
+            RuleType.SSH, RuleType.SSH_DIR, RuleType.SSH_FILE -> {
                 if (rule.sshHostAlias.isNotBlank()) {
                     sshModeCombo.selectedItem = SshModeItem(true)
                     aliasCombo.selectedItem = rule.sshHostAlias
@@ -797,7 +945,11 @@ class RuleEditDialog(
                     sshPortSpinner.number = rule.sshManualPort.coerceIn(1, 65535)
                     sshUserField.text = rule.sshManualUser
                 }
-                sshArea.text = rule.sshCommand
+                if (rule.type == RuleType.SSH) {
+                    sshArea.text = rule.sshCommand
+                } else {
+                    sshRemotePathField.text = rule.sshRemotePath
+                }
                 sshLimitSpinner.number = rule.limit.coerceIn(1, MAX_RESULT_LIMIT)
             }
         }
@@ -819,6 +971,70 @@ class RuleEditDialog(
     /** SSH 表单当前是否为现有配置模式 */
     private fun isSshExistingMode(): Boolean =
         (sshModeCombo.selectedItem as? SshModeItem)?.useExistingConfig ?: true
+
+    /**
+     * 「浏览…」：按当前表单主机配置后台 ssh ls 列远端目录，弹选择器选文件夹/文件；
+     * 主机未填给就地提示；列目录失败由选择器弹错误提示（可关闭后手输绝对路径）
+     */
+    private fun browseRemotePath() {
+        // ////////////////  校验参数：主机配置非空（别名或手填）  start  ///////////////////////
+        if (isSshExistingMode() && comboText(aliasCombo) == null) {
+            Messages.showInfoMessage(project, "请先选择或输入主机别名，再浏览远端路径", "浏览远端路径")
+            return
+        }
+        if (!isSshExistingMode() && sshHostField.text.isBlank()) {
+            Messages.showInfoMessage(project, "请先填写主机，再浏览远端路径", "浏览远端路径")
+            return
+        }
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  准备数据：临时规则承载主机配置（不走 buildRule，名称可暂空）  start  //
+        val tempRule = MatchRule(
+            id = "browse",
+            name = "browse",
+            type = selectedType(),
+            sshHostAlias = if (isSshExistingMode()) comboText(aliasCombo).orEmpty() else "",
+            sshManualHost = if (!isSshExistingMode()) sshHostField.text.trim() else "",
+            sshManualPort = if (!isSshExistingMode()) sshPortSpinner.number else 22,
+            sshManualUser = if (!isSshExistingMode()) sshUserField.text.trim() else "",
+            sshRemotePath = sshRemotePathField.text
+        )
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：初始目录=当前输入（文件则退到其父目录；空=~ 家目录）  start //
+        val normalized = SshDirRuleExecutor.normalizeRemotePath(sshRemotePathField.text)
+        val initialDir = when {
+            normalized.isEmpty() -> "~"
+            selectedType() == RuleType.SSH_FILE && !normalized.endsWith("/") -> parentRemotePath(normalized)
+            else -> normalized
+        }
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  返回：弹选择器，OK 回填路径（保留用户手输格式）  start  ///////////////
+        val dialog = RemotePathChooserDialog(
+            project = project,
+            fileMode = selectedType() == RuleType.SSH_FILE,
+            initialPath = initialDir,
+            lister = { path -> SshDirRuleExecutor.listRemoteDir(project, tempRule, path) }
+        )
+        if (dialog.showAndGet()) {
+            sshRemotePathField.text = dialog.chosenPath
+        }
+        // ////////////////  返回  end  /////////////////////////////////////////////////
+    }
+
+    /**
+     * 取远端路径的父目录（浏览 SSH_FILE 时从父目录起步；根/家目录的父仍是自身）
+     */
+    private fun parentRemotePath(path: String): String {
+        if (path == "/" || path == "~") return path
+        val parent = path.substringBeforeLast('/', "")
+        return when {
+            parent.isEmpty() -> if (path.startsWith("/")) "/" else "~"
+            parent == "~" -> "~"
+            else -> parent
+        }
+    }
 
     /** 下拉当前文本（含手输值；空白归一为 null） */
     private fun comboText(combo: JComboBox<String>): String? =
@@ -869,6 +1085,15 @@ class RuleEditDialog(
                 sshCommand = sshArea.text,
                 limit = sshLimitSpinner.number.coerceIn(1, MAX_RESULT_LIMIT)
             )
+            RuleType.SSH_DIR, RuleType.SSH_FILE -> base.copy(
+                name = nameField.text.trim(),
+                sshHostAlias = if (isSshExistingMode()) comboText(aliasCombo).orEmpty() else "",
+                sshManualHost = if (!isSshExistingMode()) sshHostField.text.trim() else "",
+                sshManualPort = if (!isSshExistingMode()) sshPortSpinner.number else 22,
+                sshManualUser = if (!isSshExistingMode()) sshUserField.text.trim() else "",
+                sshRemotePath = SshDirRuleExecutor.normalizeRemotePath(sshRemotePathField.text),
+                limit = sshLimitSpinner.number.coerceIn(1, MAX_RESULT_LIMIT)
+            )
         }
         // ////////////////  返回  end  ///////////////////////////////////////////////
     }
@@ -915,8 +1140,8 @@ class RuleEditDialog(
                 val limitError = validateLimit(sqlLimitSpinner.number, sqlLimitSpinner)
                 if (limitError != null) return limitError
             }
-            RuleType.SSH -> {
-                // 现有配置模式：别名非空；手动模式：主机非空
+            RuleType.SSH, RuleType.SSH_DIR, RuleType.SSH_FILE -> {
+                // 现有配置模式：别名非空；手动模式：主机非空（SSH 系共用）
                 if (isSshExistingMode()) {
                     if (comboText(aliasCombo) == null) {
                         return ValidationInfo("主机别名不能为空", aliasCombo)
@@ -924,8 +1149,15 @@ class RuleEditDialog(
                 } else if (sshHostField.text.isBlank()) {
                     return ValidationInfo("主机不能为空", sshHostField)
                 }
-                if (sshArea.text.isBlank()) {
-                    return ValidationInfo("远程命令不能为空", sshArea)
+                if (selectedType() == RuleType.SSH) {
+                    if (sshArea.text.isBlank()) {
+                        return ValidationInfo("远程命令不能为空", sshArea)
+                    }
+                } else {
+                    // SSH_DIR/SSH_FILE：远程路径非空（归一后校验，~ 前缀等合法输入不受影响）
+                    if (SshDirRuleExecutor.normalizeRemotePath(sshRemotePathField.text).isEmpty()) {
+                        return ValidationInfo("远程路径不能为空", sshRemotePathField)
+                    }
                 }
                 val limitError = validateLimit(sshLimitSpinner.number, sshLimitSpinner)
                 if (limitError != null) return limitError
@@ -988,6 +1220,7 @@ class RuleEditDialog(
             RuleType.REGEX -> RegexRuleExecutor()
             RuleType.SQL -> SqlRuleExecutor()
             RuleType.SSH -> SshRuleExecutor()
+            RuleType.SSH_DIR, RuleType.SSH_FILE -> SshDirRuleExecutor()
         }
         // ////////////////  校验参数  end  /////////////////////////////////////////////
 
@@ -1005,6 +1238,7 @@ class RuleEditDialog(
                                 RuleType.REGEX -> "匹配到 ${result.size} 条"
                                 RuleType.SQL -> "查询到 ${result.size} 行"
                                 RuleType.SSH -> "输出 ${result.size} 行"
+                                RuleType.SSH_DIR, RuleType.SSH_FILE -> "读取到 ${result.size} 项"
                             }
                             Messages.showInfoMessage(project, unit, "规则测试")
                         },

@@ -17,6 +17,7 @@ import com.aogg.favorites.model.SharedCollectionManagerView
 import com.aogg.favorites.model.SourceProjectStore
 import com.aogg.favorites.rules.RuleItem
 import com.aogg.favorites.rules.RuleStatus
+import com.aogg.favorites.rules.SshDirRuleExecutor
 import com.intellij.ide.DataManager
 import com.intellij.ide.DeleteProvider
 import com.intellij.ide.IdeView
@@ -39,7 +40,9 @@ import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileChooser.actions.VirtualFileDeleteProvider
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.TextRange
@@ -63,6 +66,7 @@ import java.awt.event.MouseEvent
 import java.io.File
 import java.util.Locale
 import javax.swing.AbstractAction
+import javax.swing.Action
 import javax.swing.JComponent
 import javax.swing.KeyStroke
 import javax.swing.Timer
@@ -70,6 +74,7 @@ import javax.swing.event.TreeExpansionEvent
 import javax.swing.event.TreeWillExpandListener
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.ExpandVetoException
 import javax.swing.tree.TreePath
 
 /**
@@ -361,25 +366,34 @@ class SharedEmptyHintNode {
  * 规则结果条目节点用户对象（规则节点的子节点）
  * toString 同时作为 TreeSpeedSearch 的匹配文本
  *
- * @param ruleId 所属规则 id（预留：后续按规则维度操作条目时使用）
- * @param item 结果条目（FileItem 可跳转；RowItem 带 path 可跳转；LineItem 仅展示）
+ * @param ruleId 所属规则 id（树按其回查规则拿 SSH 连接信息做远端懒加载/查看内容）
+ * @param item 结果条目（FileItem 可跳转；RowItem 带 path 可跳转；LineItem 仅展示；
+ *   RemoteFileItem=远端条目，目录可懒加载展开、文件可查看内容，1.8.1 新增）
  */
 class RuleItemNode(val ruleId: String, val item: RuleItem) {
 
     /**
-     * 是否可跳转：FileItem 恒可；RowItem 带 path 可；LineItem 不可
+     * 是否可跳转：FileItem 恒可；RowItem 带 path 可；LineItem/RemoteFileItem 不可（远端无本地文件）
      */
     val jumpable: Boolean
         get() = when (item) {
             is RuleItem.FileItem -> item.path.isNotBlank()
             is RuleItem.RowItem -> !item.path.isNullOrBlank()
             is RuleItem.LineItem -> false
+            is RuleItem.RemoteFileItem -> false
         }
+
+    /**
+     * 是否为可懒加载展开的远端目录条目（SSH_DIR/SSH_FILE 规则产物中的目录项）
+     */
+    val isRemoteDir: Boolean
+        get() = item is RuleItem.RemoteFileItem && item.isDir
 
     override fun toString(): String = when (item) {
         is RuleItem.FileItem -> item.path.substringAfterLast('/')
         is RuleItem.RowItem -> truncateRuleItemText(item.cells.joinToString("  "))
         is RuleItem.LineItem -> truncateRuleItemText(item.text)
+        is RuleItem.RemoteFileItem -> item.path.substringAfterLast('/').ifEmpty { "/" }
     }
 
     /**
@@ -394,7 +408,27 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
             }
         }
         is RuleItem.LineItem -> item.text
+        is RuleItem.RemoteFileItem -> buildString {
+            append(item.path)
+            append("\n类型: ").append(if (item.isDir) "远端目录" else "远端文件")
+        }
     }
+}
+
+/**
+ * 远端目录懒加载占位节点（1.8.1）：ssh ls 加载期间挂在远端目录条目下的提示节点
+ */
+class RemoteLoadingHintNode {
+    override fun toString(): String = "⏳ 正在读取远端目录…"
+}
+
+/**
+ * 远端目录懒加载失败占位节点（1.8.1）：tooltip 展示失败原因，右键「刷新此目录」重试
+ *
+ * @param tooltip 失败原因（ssh stderr 尾部）
+ */
+class RemoteErrorHintNode(val tooltip: String) {
+    override fun toString(): String = "❌ 读取失败（右键「刷新此目录」重试）"
 }
 
 /**
@@ -415,8 +449,13 @@ class RuleItemNode(val ruleId: String, val item: RuleItem) {
  *
  * 规则匹配（1.4.0）：第一层追加「规则匹配」根节点（排在全局收藏之后，始终显示）：
  * - 规则匹配根 → 规则节点（名称+状态后缀 ✅ M / ⏳ 执行中 / ❌，ERROR tooltip=失败原因）→ 结果条目节点
- * - 条目：FileItem 双击跳转（文件打开/目录 Project 视图选中）；RowItem/LineItem 双击弹信息框显示完整内容
+ * - 条目：FileItem 双击跳转（文件打开/目录 Project 视图选中）；RowItem/LineItem 双击弹信息框显示完整内容；
+ *   RemoteFileItem（1.8.1 SSH_DIR/SSH_FILE 规则产物）：远端目录条目像本地收藏文件夹一样带文件夹图标、
+ *   可懒加载展开（首次展开后台 ssh ls 该子目录，加载中/失败有占位提示；已拉取子级存管理器客户端缓存，
+ *   不重复拉取、不全量拉取，「刷新此目录」失效缓存重拉）；远端文件条目带文件图标，「查看内容」
+ *   ssh 拉取后只读对话框展示（不落项目内文件）
  * - 右键菜单：规则根=新建规则/全部刷新；规则=刷新此规则/编辑规则/启用禁用/删除规则；条目=跳转（仅可跳转的）
+ *   /远端目录刷新此目录/远端文件查看内容/查看详情
  * - 搜索过滤：规则名与条目文本参与匹配（规则名命中放行全部条目，否则仅保留命中条目）
  *
  * 共享收藏（1.7.0 引入，1.7.1 改版为配置来源项目模型）：第一层第二根节点「共享收藏」，根下按集合分组：
@@ -592,6 +631,12 @@ class BookmarksTree(
     /** 当前各列表的文件系统骨架（key = spineKey(scope, listName)，refresh 时重建） */
     private var listSpines: Map<String, FavoritesListSpine> = emptyMap()
 
+    /** 远端目录懒加载已加载键集合（"ruleId|路径"；命中不重复 ssh ls，重建树时按现存规则裁剪）。仅 EDT 访问 */
+    private val loadedRemoteDirKeys: MutableSet<String> = HashSet()
+
+    /** 远端目录加载中键集合（防重复提交 ssh ls；加载完成/失败后移除）。仅 EDT 访问 */
+    private val loadingRemoteDirKeys: MutableSet<String> = HashSet()
+
     /** 行内容缓存：文件绝对路径（正斜杠规范）→（行号 → 行文本；null=空白行/读取失败，显示时回退收藏描述）。仅 EDT 访问 */
     private val lineContentCache = HashMap<String, HashMap<Int, String?>>()
 
@@ -647,6 +692,12 @@ class BookmarksTree(
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount == 2) {
+                    // 远端目录条目（1.8.1）交给树原生双击展开/折叠（懒加载经 TreeWillExpandListener 触发，
+                    // 加载完成后自动展开），此处不再切换，避免原生展开后被本处理器折回
+                    val clicked = getPathForLocation(e.x, e.y)?.lastPathComponent as? DefaultMutableTreeNode
+                    if ((clicked?.userObject as? RuleItemNode)?.isRemoteDir == true) {
+                        return
+                    }
                     navigateToSelection()
                 }
             }
@@ -663,16 +714,37 @@ class BookmarksTree(
         // Enter=跳转 / F2=重命名别名 / Del=删除
         registerKeyStrokes()
 
-        // 目录懒加载：首次展开时物化骨架子项，文件夹收藏/真实目录再合并真实文件系统子项
+        // 目录懒加载：首次展开时物化骨架子项，文件夹收藏/真实目录再合并真实文件系统子项；
+        // 远端目录条目（1.8.1）展开时缓存优先，未拉取过否决展开改走后台 ssh ls
         addTreeWillExpandListener(object : TreeWillExpandListener {
+            @Throws(ExpandVetoException::class)
             override fun treeWillExpand(event: TreeExpansionEvent) {
-                // ////////////////  核心逻辑：懒加载目录子项  start  //////////////////////
+                // ////////////////  核心逻辑一：本地目录懒加载骨架子项  start  ////////////////////
                 val treeNode = event.path.lastPathComponent as? DefaultMutableTreeNode ?: return
-                val dir = treeNode.userObject as? DirNode ?: return
-                if (!dir.childrenLoaded) {
-                    loadDirChildren(treeNode, dir)
+                val dir = treeNode.userObject as? DirNode
+                if (dir != null) {
+                    if (!dir.childrenLoaded) {
+                        loadDirChildren(treeNode, dir)
+                    }
+                    return
                 }
-                // ////////////////  核心逻辑  end  ///////////////////////////////////////
+                // ////////////////  核心逻辑一  end  ///////////////////////////////////////
+
+                // ////////////////  核心逻辑二：远端目录条目懒加载（缓存优先）  start  ////////////
+                val itemNode = treeNode.userObject as? RuleItemNode ?: return
+                if (!itemNode.isRemoteDir) return
+                val remotePath = (itemNode.item as RuleItem.RemoteFileItem).path
+                // 缓存命中直接放行展开，不重复 ssh ls；子项已随整树重建物化过的（childCount>0）不再重复物化
+                if (remoteDirKey(itemNode.ruleId, remotePath) in loadedRemoteDirKeys &&
+                    (treeNode.childCount > 0 || fillRemoteDirChildrenFromCache(treeNode, itemNode))
+                ) {
+                    return
+                }
+                // 未拉取过/缓存失效：否决本次展开，发起后台 ssh ls（完成后回调自动展开）
+                loadedRemoteDirKeys.remove(remoteDirKey(itemNode.ruleId, remotePath))
+                beginLoadRemoteDirChildren(treeNode, itemNode)
+                throw ExpandVetoException(event)
+                // ////////////////  核心逻辑二  end  ///////////////////////////////////////
             }
 
             override fun treeWillCollapse(event: TreeExpansionEvent) {
@@ -1038,6 +1110,10 @@ class BookmarksTree(
             return rootNode
         }
 
+        // 裁剪远端目录已加载键：仅保留现存规则的键（规则删除后防集合泄漏）
+        val ruleIds = rules.mapTo(HashSet()) { it.id }
+        loadedRemoteDirKeys.removeIf { key -> key.substringBefore('|') !in ruleIds }
+
         for (rule in rules) {
             val result = manager.getResult(rule.id)
             val items = result?.items ?: emptyList()
@@ -1061,8 +1137,14 @@ class BookmarksTree(
                 visibleItems.isNotEmpty()
             )
             for (item in visibleItems) {
-                // 规则条目为叶子节点（不可展开）
-                ruleTreeNode.add(DefaultMutableTreeNode(RuleItemNode(rule.id, item), false))
+                // 远端目录条目（1.8.1）可懒加载展开；其余条目保持叶子节点不出空展开把手
+                val isRemoteDir = item is RuleItem.RemoteFileItem && item.isDir
+                val itemTreeNode = DefaultMutableTreeNode(RuleItemNode(rule.id, item), isRemoteDir)
+                if (isRemoteDir) {
+                    // 已拉取过的远端目录直接从管理器缓存物化子项（整树重建后展开把手即有内容）
+                    fillRemoteDirChildrenFromCache(itemTreeNode, itemTreeNode.userObject as RuleItemNode)
+                }
+                ruleTreeNode.add(itemTreeNode)
             }
             rootNode.add(ruleTreeNode)
         }
@@ -1223,8 +1305,104 @@ class BookmarksTree(
             is RuleItem.FileItem -> jumpToRuleItemPath(item.path, item.isFolder)
             is RuleItem.RowItem -> showRuleItemInfoDialog(node)
             is RuleItem.LineItem -> showRuleItemInfoDialog(node)
+            is RuleItem.RemoteFileItem -> activateRemoteFileItem(node, item)
         }
         // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 激活远端条目（双击/Enter，1.8.1）：
+     * 目录=切换展开/折叠（展开触发懒加载：已缓存直接呈现，未拉取过后台 ssh ls）；
+     * 文件=ssh 拉取内容弹只读对话框（不落项目内文件）
+     *
+     * @param node 条目节点用户对象
+     * @param item 远端条目
+     */
+    private fun activateRemoteFileItem(node: RuleItemNode, item: RuleItem.RemoteFileItem) {
+        // ////////////////  分支：目录=展开切换；文件=查看内容  start  /////////////////////////
+        if (item.isDir) {
+            val treeNode = selectionPath?.lastPathComponent as? DefaultMutableTreeNode ?: return
+            if (treeNode.userObject !== node) return
+            if (isExpanded(TreePath(treeNode.path))) {
+                collapsePath(TreePath(treeNode.path))
+            } else {
+                // 展开动作经 TreeWillExpandListener：已缓存直接放行，未拉取过被否决后由回调自动展开
+                expandPath(TreePath(treeNode.path))
+            }
+        } else {
+            showRemoteFileContent(node)
+        }
+        // ////////////////  分支  end  /////////////////////////////////////////////////
+    }
+
+    /**
+     * 查看远端文件内容（双击/右键入口，1.8.1）：ssh head 限量拉取（模态进度）后弹只读对话框，
+     * 不落项目内文件；失败弹错误提示（stderr 尾部）
+     *
+     * @param itemNode 远端文件条目节点用户对象
+     */
+    private fun showRemoteFileContent(itemNode: RuleItemNode) {
+        // ////////////////  校验参数：远端文件条目 + 规则可用  start  /////////////////////////
+        val remote = itemNode.item as? RuleItem.RemoteFileItem ?: return
+        if (remote.isDir) return
+        val manager = runCatching { RuleMatchManager.getInstance(project) }.getOrNull() ?: return
+        val rule = manager.getRule(itemNode.ruleId) ?: return
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：模态进度后台 ssh 拉取 + 只读对话框展示  start  ////////////
+        // runProcessWithProgressSynchronously(Runnable…) 返回 boolean（取消=false），
+        // 拉取结果经闭包变量带出（后台任务在对话框关闭前完成，仅 EDT 读回写值）
+        var fetched: Result<String>? = null
+        val confirmed = ProgressManager.getInstance().runProcessWithProgressSynchronously(
+            {
+                fetched = runCatching { SshDirRuleExecutor.readRemoteFile(project, rule, remote.path) }
+            },
+            "正在读取远端文件内容…",
+            true,
+            project
+        )
+        if (!confirmed) return
+        val content = fetched ?: Result.failure(IllegalStateException("远端文件读取任务未执行"))
+        content.fold(
+            onSuccess = { text -> showRemoteContentDialog(remote.path, text) },
+            onFailure = { error ->
+                log.warn("读取远端文件失败：${remote.path}", error)
+                Messages.showErrorDialog(
+                    project,
+                    "读取远端文件失败：${error.message ?: error.javaClass.simpleName}",
+                    "查看远端文件"
+                )
+            }
+        )
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
+    }
+
+    /**
+     * 远端文件内容只读对话框（1.8.1）：只读文本区展示拉取内容，仅一个「关闭」动作
+     *
+     * @param path 远端路径（标题展示）
+     * @param content 文件文本（超长已由执行器截断加尾注）
+     */
+    private fun showRemoteContentDialog(path: String, content: String) {
+        runCatching {
+            object : DialogWrapper(project) {
+                init {
+                    title = "远端文件内容（只读）：$path"
+                    init()
+                }
+
+                override fun createCenterPanel(): JComponent {
+                    val area = javax.swing.JTextArea(content, 24, 100)
+                    area.isEditable = false
+                    area.lineWrap = false
+                    val scroll = javax.swing.JScrollPane(area)
+                    scroll.preferredSize = java.awt.Dimension(880, 560)
+                    return scroll
+                }
+
+                override fun createActions(): Array<Action> = arrayOf(okAction)
+            }.show()
+        }.onFailure { log.warn("显示远端文件内容失败：$path", it) }
     }
 
     /**
@@ -1250,12 +1428,201 @@ class BookmarksTree(
     }
 
     /**
-     * 弹信息框显示规则条目完整内容（RowItem 多列 tab 拼接 + 可选路径行；LineItem 完整行文本）
+     * 弹信息框显示规则条目完整内容（RowItem 多列 tab 拼接 + 可选路径行；LineItem 完整行文本；
+     * RemoteFileItem 展示远端路径与类型）
      */
     private fun showRuleItemInfoDialog(node: RuleItemNode) {
         runCatching {
             Messages.showInfoMessage(project, node.detailText(), "规则结果详情")
         }.onFailure { log.warn("显示规则条目详情失败", it) }
+    }
+
+    // ==================== 远端目录懒加载（1.8.1 SSH_DIR/SSH_FILE） ====================
+
+    /**
+     * 远端目录懒加载缓存键（ruleId|远端路径；与 RuleMatchManager 缓存键口径一致）
+     */
+    private fun remoteDirKey(ruleId: String, path: String): String = "$ruleId|$path"
+
+    /**
+     * 从管理器缓存物化远端目录子项（懒加载命中不重复 ssh ls；目录子项递归带出孙级缓存，
+     * 展开把手即时有内容，与「已拉取的存客户端缓存、不全量拉取」口径一致）
+     *
+     * @param treeNode 远端目录条目对应的树节点
+     * @param itemNode 远端目录条目用户对象
+     * @return true=缓存命中并已物化子项；false=未拉取过/缓存失效（调用方走后台加载）
+     */
+    private fun fillRemoteDirChildrenFromCache(treeNode: DefaultMutableTreeNode, itemNode: RuleItemNode): Boolean {
+        // ////////////////  校验参数：远端目录条目 + 管理器可用  start  ///////////////////////
+        val remote = itemNode.item as? RuleItem.RemoteFileItem ?: return false
+        if (!remote.isDir) return false
+        val manager = runCatching { RuleMatchManager.getInstance(project) }.getOrNull() ?: return false
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：缓存命中物化子项（目录子项递归带出孙级缓存）  start  ///////
+        val children = manager.cachedRemoteDirChildren(itemNode.ruleId, remote.path) ?: return false
+        for (child in children) {
+            val childIsDir = child.isDir
+            val childNode = DefaultMutableTreeNode(
+                RuleItemNode(itemNode.ruleId, child),
+                childIsDir
+            )
+            if (childIsDir) {
+                fillRemoteDirChildrenFromCache(childNode, childNode.userObject as RuleItemNode)
+            }
+            treeNode.add(childNode)
+        }
+        return true
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    /**
+     * 发起远端目录懒加载（EDT）：挂「加载中」占位子节点后后台 ssh ls，完成后回 EDT 原位替换子项
+     * 并自动展开；同一目录加载中重复调用忽略（防重复 ssh ls）
+     *
+     * @param treeNode 远端目录条目对应的树节点
+     * @param itemNode 远端目录条目用户对象
+     * @return true=本次发起加载；false=已在加载中（未重复发起）
+     */
+    private fun beginLoadRemoteDirChildren(treeNode: DefaultMutableTreeNode, itemNode: RuleItemNode): Boolean {
+        // ////////////////  校验参数：远端目录条目 + 未在加载中  start  ///////////////////////
+        val remote = itemNode.item as? RuleItem.RemoteFileItem ?: return false
+        val key = remoteDirKey(itemNode.ruleId, remote.path)
+        if (key in loadingRemoteDirKeys) return false
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：占位 + 后台 ssh ls + EDT 回调  start  ///////////////////
+        loadingRemoteDirKeys.add(key)
+        treeNode.removeAllChildren()
+        treeNode.add(DefaultMutableTreeNode(RemoteLoadingHintNode(), false))
+        (model as? DefaultTreeModel)?.nodeStructureChanged(treeNode)
+
+        val manager = runCatching { RuleMatchManager.getInstance(project) }.getOrNull()
+        if (manager == null) {
+            loadingRemoteDirKeys.remove(key)
+            replaceRemoteDirChildren(treeNode, itemNode, listOf(RemoteErrorHintNode("规则匹配管理器不可用")))
+            return true
+        }
+        manager.listRemoteDirAsync(itemNode.ruleId, remote.path) { result ->
+            loadingRemoteDirKeys.remove(key)
+            onRemoteDirChildrenLoaded(treeNode, itemNode, key, result)
+        }
+        return true
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    /**
+     * 远端目录子项加载完成回调（EDT）：成功=物化子项、记已加载键、自动展开；
+     * 失败=错误占位子节点（tooltip=原因，右键「刷新此目录」重试，不记已加载键）；
+     * 节点已脱离当前树模型（加载期间整树被重建）时退化为整树重建（缓存已由管理器落好，重建即带上）
+     */
+    private fun onRemoteDirChildrenLoaded(
+        treeNode: DefaultMutableTreeNode,
+        itemNode: RuleItemNode,
+        key: String,
+        result: Result<List<RuleItem.RemoteFileItem>>
+    ) {
+        // ////////////////  校验参数：节点仍在当前树模型内  start  ///////////////////////////
+        val treeModel = model as? DefaultTreeModel ?: return
+        if (treeNode.root !== treeModel.root) {
+            refresh(filterText)
+            return
+        }
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：成功物化自动展开 / 失败错误占位  start  /////////////////
+        result.fold(
+            onSuccess = { children ->
+                loadedRemoteDirKeys.add(key)
+                replaceRemoteDirChildren(treeNode, itemNode, children)
+                expandPath(TreePath(treeNode.path))
+            },
+            onFailure = { error ->
+                log.warn(
+                    "读取远端目录失败：${(itemNode.item as? RuleItem.RemoteFileItem)?.path}",
+                    error
+                )
+                replaceRemoteDirChildren(
+                    treeNode,
+                    itemNode,
+                    listOf(RemoteErrorHintNode(error.message ?: error.javaClass.simpleName))
+                )
+            }
+        )
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    /**
+     * 原位替换远端目录子项（EDT）：清空旧子节点（含加载占位）后按条目重建
+     * （目录子项带展开把手并递归带出孙级缓存），结构变化通知模型
+     */
+    private fun replaceRemoteDirChildren(
+        treeNode: DefaultMutableTreeNode,
+        itemNode: RuleItemNode,
+        children: List<Any>
+    ) {
+        // ////////////////  核心逻辑：清空重建（条目/占位节点）  start  ///////////////////////
+        treeNode.removeAllChildren()
+        for (child in children) {
+            if (child is RuleItem.RemoteFileItem) {
+                val childIsDir = child.isDir
+                val childNode = DefaultMutableTreeNode(RuleItemNode(itemNode.ruleId, child), childIsDir)
+                if (childIsDir) {
+                    fillRemoteDirChildrenFromCache(childNode, childNode.userObject as RuleItemNode)
+                }
+                treeNode.add(childNode)
+            } else {
+                treeNode.add(DefaultMutableTreeNode(child, false))
+            }
+        }
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  逻辑后：通知模型结构变化  start  ////////////////////////////////
+        (model as? DefaultTreeModel)?.nodeStructureChanged(treeNode)
+        // ////////////////  逻辑后  end  ///////////////////////////////////////////////
+    }
+
+    /**
+     * 右键「刷新此目录」（1.8.1）：失效该目录及其子级缓存后原位重新懒加载（保持当前展开态语义：
+     * 加载完成后回调自动展开该目录；子级目录缓存清空后按需再拉，不一次性全量刷新）
+     *
+     * @param itemNode 右键点中的远端目录条目用户对象
+     */
+    private fun refreshRemoteDir(itemNode: RuleItemNode) {
+        // ////////////////  校验参数：远端目录条目 + 树节点仍在模型内 + 管理器可用  start  ////////
+        val remote = itemNode.item as? RuleItem.RemoteFileItem ?: return
+        if (!remote.isDir) return
+        val treeNode = findTreeNodeByUserObject(itemNode) ?: return
+        val manager = runCatching { RuleMatchManager.getInstance(project) }.getOrNull() ?: return
+        // ////////////////  校验参数  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：失效缓存 → 清空子项 → 重新懒加载  start  /////////////////
+        manager.invalidateRemoteDirCache(itemNode.ruleId, remote.path)
+        loadedRemoteDirKeys.remove(remoteDirKey(itemNode.ruleId, remote.path))
+        treeNode.removeAllChildren()
+        (model as? DefaultTreeModel)?.nodeStructureChanged(treeNode)
+        beginLoadRemoteDirChildren(treeNode, itemNode)
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    /**
+     * 按用户对象引用查找当前树模型内的节点（右键动作拿不到节点实例时兜底；
+     * 整树重建后旧实例已脱离模型，找不到返回 null）
+     */
+    private fun findTreeNodeByUserObject(target: Any): DefaultMutableTreeNode? {
+        // ////////////////  准备数据：根节点  start  /////////////////////////////////////
+        val root = (model as? DefaultTreeModel)?.root as? DefaultMutableTreeNode ?: return null
+        // ////////////////  准备数据  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：深度优先按引用匹配  start  /////////////////////////////
+        var found: DefaultMutableTreeNode? = null
+        walkTreeNodes(root) { node ->
+            if (found == null && node.userObject === target) {
+                found = node
+            }
+        }
+        return found
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
     }
 
     /**
@@ -1819,6 +2186,22 @@ class BookmarksTree(
                 group.add(object : AnAction("跳转", "打开文件或在 Project 视图中选中目录", null) {
                     override fun actionPerformed(e: AnActionEvent) {
                         navigateToSelection()
+                    }
+                })
+            }
+            // 远端条目（1.8.1）：目录=刷新此目录（清缓存重拉）；文件=查看内容（ssh 只读拉取）
+            val remote = userObject.item as? RuleItem.RemoteFileItem
+            if (remote != null && remote.isDir) {
+                group.add(object : AnAction("刷新此目录", "重新 ssh ls 该远端目录（已加载子级缓存一并清除）", null) {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        refreshRemoteDir(userObject)
+                    }
+                })
+            }
+            if (remote != null && !remote.isDir) {
+                group.add(object : AnAction("查看内容", "ssh 拉取远端文件内容只读展示（不落项目内文件）", null) {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        showRemoteFileContent(userObject)
                     }
                 })
             }

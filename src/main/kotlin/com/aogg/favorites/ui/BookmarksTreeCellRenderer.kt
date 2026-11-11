@@ -29,8 +29,10 @@ import javax.swing.tree.DefaultMutableTreeNode
  * - 行收藏节点：助记符/匿名书签图标 + "行号:" + 灰色行内容（1.7.2 起有别名时灰色文本为「别名 · 行内容」）
  * - 未收藏真实文件节点：文件类型图标 + 文件名
  * - 规则匹配根节点（1.4.0）：文件夹图标 + "规则匹配 (N 规则/M 条)"
- * - 规则节点（1.4.0）：按规则类型给图标（正则/SQL/SSH）；主文本含状态后缀（✅ M / ⏳ / ❌），ERROR 时 tooltip=失败原因
- * - 规则条目节点（1.4.0）：FileItem 用 IDE 文件类型图标（文件名+灰色父路径）；RowItem/LineItem 用文档图标
+ * - 规则节点（1.4.0）：按规则类型给图标（正则/SQL/SSH/远程文件夹/远程文件）；主文本含状态后缀（✅ M / ⏳ / ❌），ERROR 时 tooltip=失败原因
+ * - 规则条目节点（1.4.0）：FileItem 用 IDE 文件类型图标（文件名+灰色父路径）；RowItem/LineItem 用文档图标；
+ *   RemoteFileItem（1.8.1）：远端目录=文件夹图标、远端文件=扩展名文件图标（文件名+灰色远端路径，tooltip=完整远端路径）
+ * - 远端目录懒加载占位节点（1.8.1）：加载中=信息图标+灰色提示；失败=错误图标+提示（tooltip=失败原因）
  * - 兜底：未识别节点类型给通用图标（AllIcons.FileTypes.Any）+ toString 主文本，任何分支漏配/新增节点类型不至于无图标
  * 各节点 toString 返回主文本，作为 TreeSpeedSearch 的匹配文本（灰色说明文字不参与速度搜索）
  *
@@ -162,6 +164,9 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                     RuleType.REGEX -> AllIcons.Actions.Regex
                     RuleType.SQL -> AllIcons.Nodes.DataTables
                     RuleType.SSH -> AllIcons.Nodes.Console
+                    RuleType.SSH_DIR -> AllIcons.Nodes.Folder
+                    // 2023.3 SDK 无 Nodes.File，远程文件规则节点用通用文件类型图标兜底
+                    RuleType.SSH_FILE -> AllIcons.FileTypes.Any_type
                 }
                 append(node.rule.name)
                 when (node.status) {
@@ -199,7 +204,31 @@ class BookmarksTreeCellRenderer(private val project: Project) : ColoredTreeCellR
                         icon = AllIcons.FileTypes.Text
                         append(node.toString())
                     }
+                    is RuleItem.RemoteFileItem -> {
+                        // 远端条目（1.8.1）：目录=文件夹图标；文件=按扩展名文件类型图标；灰色补充远端路径
+                        icon = if (item.isDir) {
+                            AllIcons.Nodes.Folder
+                        } else {
+                            BookmarkIconHelper.getFileIcon(null, item.path.substringAfterLast('/'))
+                        }
+                        append(node.toString())
+                        if (item.path != "/" && item.path != "~") {
+                            append("  ${item.path}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                        }
+                        toolTipText = item.path
+                    }
                 }
+            }
+            // 远端目录懒加载占位节点（1.8.1）：加载中=信息图标+灰色提示
+            is RemoteLoadingHintNode -> {
+                icon = AllIcons.General.Information
+                append(node.toString(), SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            }
+            // 远端目录懒加载失败占位节点（1.8.1）：错误图标+提示，tooltip=失败原因
+            is RemoteErrorHintNode -> {
+                icon = AllIcons.General.Error
+                append(node.toString(), SimpleTextAttributes.ERROR_ATTRIBUTES)
+                toolTipText = node.tooltip
             }
             // 兜底：未识别节点类型（分支漏配/新增节点类型未配时）给通用图标 + toString 主文本，保证任何节点都有图标可显示
             // （通用文件图标常量在 2023.3 SDK 中为 FileTypes.Any_type，对应通用「任一文件类型」图标）
