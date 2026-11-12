@@ -485,7 +485,8 @@ private data class DirStructureRefreshTarget(
  *
  * 交互：
  * - Enter / 双击 = 跳转（行→编辑器定位；文件→打开；文件夹→Project 视图选中；未收藏真实节点同样可跳转）
- * - F2 = 重命名别名、Del = 删除（通过 [Interactions] 回调到面板实现；未收藏真实节点收藏类操作不可用）
+ * - F2 = 重命名别名、Del = 删除收藏/删除列表（收藏条目、列表节点，通过 [Interactions] 回调到面板实现）；
+ *   未收藏真实文件/懒加载真实子目录 = 删磁盘（平台 VirtualFileDeleteProvider 删除，带确认对话框）
  * - 右键菜单：作用域根/列表分组节点（项目/全局）首项=添加目录…（弹平台目录选择器写入收藏）；
  *   跳转/重命名别名…/设置助记符/移动到列表(按作用域分组、按分组层级嵌套)/分组CRUD
  *   （分组节点=新建子分组；选中默认列表或作用域节点=新建顶级列表；删除分组级联连删子分组）/删除收藏 + 规则匹配菜单
@@ -748,7 +749,7 @@ class BookmarksTree(
             }
         })
 
-        // Enter=跳转 / F2=重命名别名 / Del=删除
+        // Enter=跳转 / F2=重命名别名 / Del=删除收藏/删除列表（收藏条目、列表节点）；真实文件/目录=删磁盘（平台删除，带确认）
         registerKeyStrokes()
 
         // 目录懒加载：首次展开时物化骨架子项，文件夹收藏/真实目录再合并真实文件系统子项；
@@ -2522,12 +2523,65 @@ class BookmarksTree(
             }
         })
 
+        // ////////////////  Del 键：按选中类型分派  start  ////////////////////////////
+        // 收藏条目/列表节点 = 删除收藏/删除列表（经 [Interactions]，语义不变，含外来共享只读提示）；
+        // 其余选中（未收藏真实文件、懒加载真实子目录）= 真实文件/目录磁盘删除（平台删除，带确认）
         inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), ACTION_KEY_DELETE)
         actionMap.put(ACTION_KEY_DELETE, object : AbstractAction() {
             override fun actionPerformed(e: ActionEvent) {
-                interactions.deleteSelected()
+                val hasBookmarkOrList = getSelectedBookmarks().isNotEmpty() || getSelectedList() != null
+                if (hasBookmarkOrList) {
+                    interactions.deleteSelected()
+                } else {
+                    deleteRealFilesFromDisk()
+                }
             }
         })
+        // ////////////////  Del 键：按选中类型分派  end  //////////////////////////////
+    }
+
+    /**
+     * 真实文件/目录磁盘删除（Del 键兜底分支）：
+     * 选中的既非收藏条目也非列表节点时，收集选中节点里的真实 VirtualFile（未收藏真实文件
+     * RealFileNode、懒加载真实子目录 fsBacked=true 的 DirNode；FileNode/LineEntryNode/规则/共享/
+     * 列表/虚拟目录等一律跳过），合并注入最小 DataContext（PROJECT + VIRTUAL_FILE_ARRAY）后交
+     * [targetDeleteProvider]（平台 VirtualFileDeleteProvider，与右键「项目视图操作▸删除」同款）删除：
+     * 平台自带确认对话框与 VFS 删除，文件与目录均支持；删除落盘后由既有 VFS 结构监听自动刷新
+     * 父目录节点，此处无需额外刷新。收集结果为空时静默返回（与现状一致，不弹任何提示）。
+     */
+    private fun deleteRealFilesFromDisk() {
+        // ////////////////  收集选中节点里的真实文件/目录  start  ///////////////////////
+        val targetFiles = selectionPaths
+            ?.mapNotNull { path -> (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject }
+            ?.mapNotNull { userObject ->
+                when (userObject) {
+                    is RealFileNode -> userObject.virtualFile.takeIf { it.isValid }
+                    is DirNode -> if (userObject.fsBacked) resolveNodePath(userObject.scope, userObject.path) else null
+                    // FileNode/LineEntryNode/规则/共享/列表/虚拟目录等：非真实文件，跳过
+                    else -> null
+                }
+            }
+            ?.distinct()
+            ?.toTypedArray()
+            ?: emptyArray()
+        if (targetFiles.isEmpty()) return
+        // ////////////////  收集选中节点里的真实文件/目录  end  /////////////////////////
+
+        // ////////////////  核心逻辑：平台删除（自带确认对话框，失败只记日志不抛异常）  start  //
+        log.info("Del 键删除磁盘文件/目录（deleteCount=${targetFiles.size}（删除项数量）、samplePath=${targetFiles.first().path}（样例路径））")
+        runCatching {
+            val dataContext = DataContext { dataId ->
+                when (dataId) {
+                    CommonDataKeys.PROJECT.name -> project
+                    CommonDataKeys.VIRTUAL_FILE_ARRAY.name -> targetFiles
+                    else -> null
+                }
+            }
+            targetDeleteProvider.deleteElement(dataContext)
+        }.onFailure {
+            log.warn("Del 键删除磁盘文件/目录失败（deleteCount=${targetFiles.size}（删除项数量））", it)
+        }
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
     }
 
     /**
