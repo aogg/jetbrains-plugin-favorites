@@ -14,10 +14,12 @@ import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.editor.markup.GutterIconRenderer
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.TextEditor
+import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiWhiteSpace
+import com.intellij.psi.util.PsiTreeUtil
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 编辑器行号区域图标显示助手
@@ -28,29 +30,49 @@ import com.intellij.psi.PsiWhiteSpace
  * 1.7.0 三作用域：共享收藏（自己+订阅集合，按【绝对路径】匹配）并入查询，
  * 优先级 项目 → 共享 → 全局；三个作用域都使用行收藏索引（O(1) 查找），保持现有性能（避免全量扫描）。
  * 1.8.0：助记符图标带字符（0-9/A-Z）、点击图标跳转到收藏行、tooltip 列出同一行的全部收藏。
+ * 1.8.1：行锚点改为「该行唯一锚点」（行首叶子 / 缩进行第一个叶子，见 [BookmarkGutterAnchors]）——
+ * 1.8.0 只认「元素起点 == 行首」，而 PSI 里缩进行的行首偏移上往往没有叶子（换行+缩进是同一个
+ * 空白 token，起点落在上一行），导致所有缩进行永远不显示图标；同时补诊断日志（provider 是否被调用、
+ * 命中哪一行），并实现 [DumbAware] 让索引期间也能显示图标。
  */
-class BookmarkGutterHelper : LineMarkerProvider {
+class BookmarkGutterHelper : LineMarkerProvider, DumbAware {
 
     override fun getLineMarkerInfo(element: PsiElement): LineMarkerInfo<*>? {
-        // 只处理非空白元素的第一行
-        if (element is PsiWhiteSpace) {
-            return null
+        // ////////////////  诊断：第一次被平台调用时打一条 INFO  start  /////////////////
+        // 用途：用户回传 idea.log 时按「Favorites 行收藏图标 provider 已激活」区分
+        // 「provider 根本没被平台调用」与「被调用了但没命中收藏（锚点/数据问题）」
+        if (activated.compareAndSet(false, true)) {
+            log.info("Favorites 行收藏图标 provider 已激活（file=${element.containingFile?.name ?: "?"}）")
         }
+        // ////////////////  诊断  end  ////////////////////////////////////////////////
 
-        val project = element.project
+        // ////////////////  校验参数：只处理叶子元素（平台要求），零长叶子跳过  start  ////
+        if (element.firstChild != null) return null
+        if (element.textLength <= 0) return null
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  行锚点判定：该行唯一锚点（行首叶子；行首无叶子时取缩进行第一个叶子）  start
         val file = element.containingFile ?: return null
         val virtualFile = file.virtualFile ?: return null
-
         val document = file.viewProvider.document ?: return null
-        val lineNumber = document.getLineNumber(element.textOffset)
-
-        // 只处理每行的第一个元素
+        val elementOffset = element.textOffset
+        val lineNumber = document.getLineNumber(elementOffset)
         val lineStartOffset = document.getLineStartOffset(lineNumber)
-        if (element.textOffset != lineStartOffset) {
+        // 前一个叶子：缩进行的行首缩进属于上一个（跨行）空白 token，据此判断「本行第一个叶子」
+        val prevLeafOffset = PsiTreeUtil.prevLeaf(element)?.textOffset ?: -1
+        if (!BookmarkGutterAnchors.isAnchorOfItsLine(
+                isLeaf = true,
+                textLength = element.textLength,
+                elementOffset = elementOffset,
+                lineStartOffset = lineStartOffset,
+                prevLeafOffset = prevLeafOffset
+            )) {
             return null
         }
+        // ////////////////  行锚点判定  end  //////////////////////////////////////////
 
-        // 查找该行的收藏：项目（相对路径索引）+ 共享（绝对路径）+ 全局（绝对路径）
+        // ////////////////  核心逻辑：查找该行的收藏（项目相对路径索引 + 共享/全局绝对路径索引）  start
+        val project = element.project
         val bookmarks = findLineBookmarks(project, virtualFile.path, lineNumber)
             .filter { it.type == BookmarkType.LINE }
 
@@ -61,15 +83,23 @@ class BookmarkGutterHelper : LineMarkerProvider {
         // 优先显示助记符收藏（项目作用域优先于共享/全局作用域），否则显示匿名收藏
         val mnemonicBookmark = bookmarks.firstOrNull { it.isMnemonic() }
         val bookmark = mnemonicBookmark ?: bookmarks.firstOrNull { it.isAnonymous() } ?: return null
+        // ////////////////  核心逻辑  end  ////////////////////////////////////////////
 
-        // 创建图标（1.8.0：助记符 → 书签+字符复合图标；匿名 → 原生书签图标）
+        // ////////////////  准备数据：图标（1.8.1 助记符 → 平台原生助记符 gutter 图标；匿名 → 原生书签）  start
         val icon = if (bookmark.isMnemonic() && bookmark.mnemonic != null) {
             BookmarkIconHelper.getMnemonicIcon(bookmark.mnemonic)
         } else {
             BookmarkIconHelper.ANONYMOUS_ICON
         }
+        // ////////////////  准备数据  end  ////////////////////////////////////////////
 
-        // 创建行标记信息：tooltip 列出同一行的全部收藏，点击图标跳转到图标对应的那条收藏
+        // ////////////////  诊断：每次成功生成图标打一条 INFO（命中行/助记符，用户按关键词搜索）  start
+        log.info(
+            "Favorites 行收藏图标：file=${virtualFile.path}, line=$lineNumber（0基）, 助记符=${bookmark.mnemonic ?: "无（匿名）"}"
+        )
+        // ////////////////  诊断  end  ////////////////////////////////////////////////
+
+        // ////////////////  返回：行标记（tooltip 列出同一行全部收藏，点击跳转到图标对应收藏）  start
         val tooltipText = createTooltip(bookmarks, bookmark)
         return LineMarkerInfo(
             element,
@@ -80,6 +110,7 @@ class BookmarkGutterHelper : LineMarkerProvider {
             GutterIconRenderer.Alignment.LEFT,
             { "收藏: ${bookmark.getDisplayName()}" }
         )
+        // ////////////////  返回  end  ////////////////////////////////////////////////
     }
 
     /**
@@ -256,5 +287,13 @@ class BookmarkGutterHelper : LineMarkerProvider {
     companion object {
         /** 日志 */
         private val log = Logger.getInstance(BookmarkGutterHelper::class.java)
+
+        /**
+         * 是否已经打过「provider 已激活」诊断日志（1.8.1）
+         *
+         * 只打一次：daemon 每轮都会调用 provider，重复打日志会刷屏；
+         * 但这次必须能证明「平台确实调用了 provider」——没有该日志即说明 provider 未被注册/未被启用。
+         */
+        private val activated = AtomicBoolean(false)
     }
 }

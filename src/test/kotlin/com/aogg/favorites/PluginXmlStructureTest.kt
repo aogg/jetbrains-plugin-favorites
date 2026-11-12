@@ -28,6 +28,10 @@ import org.junit.jupiter.api.Test
  * - Favorites.Group **不再**挂 EditorGutterPopupMenu（行号区右键）——同上
  * - Favorites.Group 仍挂 ProjectViewPopupMenu / EditorTabPopupMenu / NavbarPopupMenu，且只有这三处
  * - `<version>` 不低于 1.8（本次菜单去重从 1.8.0 起，防版本号/描述符被一起回退到 1.7.x）
+ * - `codeInsight.lineMarkerProvider` 注册的 `language` 属性为空串（1.8.1 守卫）：
+ *   空 language 即注册到平台 `Language.ANY`（其 ID 就是空串），`LineMarkersPass.getMarkerProviders`
+ *   经 `allForLanguageOrAny` 对每个语言（含 PHP）都拼入 ANY 注册项——写死某个语言会让行号区图标
+ *   在其它语言的编辑器里全部消失
  */
 class PluginXmlStructureTest {
 
@@ -49,6 +53,9 @@ class PluginXmlStructureTest {
         "EditorTabPopupMenu", // 编辑器标签页右键
         "NavbarPopupMenu" // 导航栏（文件路径导航条）右键
     )
+
+    /** 行号区图标 provider 实现类（plugin.xml 里 codeInsight.lineMarkerProvider 的 implementationClass） */
+    private val lineMarkerProviderClass = "com.aogg.favorites.helper.BookmarkGutterHelper"
 
     /**
      * 读取并解析插件主 plugin.xml
@@ -168,6 +175,33 @@ class PluginXmlStructureTest {
         assertTrue(
             major!! > 1 || (major == 1 && minor!! >= 8),
             "版本 $version 低于 1.8：菜单去重（移除 EditorPopupMenu / EditorGutterPopupMenu 挂载）从 1.8.0 起"
+        )
+    }
+
+    /**
+     * 行号区图标 provider（codeInsight.lineMarkerProvider）必须以空 `language` 注册到全部语言（1.8.1 守卫）
+     *
+     * 平台机制核实（2023.3 源码）：`Language.ANY = new Language("")`（ID 即空串），
+     * `LineMarkersPass.getMarkerProviders` → `LineMarkerProviders.allForLanguageOrAny(language)`
+     * 对任何真实语言都会拼上「ANY（空 key）」注册的 provider——所以 `language=""` 是「所有语言（含 PHP）」
+     * 的唯一正确写法；若写成 `language="PHP"` 这类单语言，其它语言的编辑器行号区将永远没有收藏图标。
+     */
+    @Test
+    fun `line marker provider should be registered for all languages with empty language attribute`() {
+        val providers = pluginXml().rootElement
+            .getChildren("extensions")
+            .flatMap { extensions -> extensions.getChildren("codeInsight.lineMarkerProvider") }
+            .filter { element -> element.getAttributeValue("implementationClass") == lineMarkerProviderClass }
+        assertEquals(
+            1,
+            providers.size,
+            "行号区图标 provider 应恰好注册一次，实际 ${providers.size} 个"
+        )
+        val language = providers.single().getAttributeValue("language")
+        assertTrue(
+            language != null && language.isEmpty(),
+            "lineMarkerProvider 的 language 属性必须是空串（= 平台 Language.ANY，覆盖全部语言含 PHP），" +
+                "实际值「$language」——写成具体语言会让其它语言编辑器的行号区图标全部消失"
         )
     }
 }

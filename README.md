@@ -19,7 +19,7 @@
 - **收藏路径宏解析与打开失败提示（1.7.3）**：原生书签导入的收藏支持展开 `$APPLICATION_CONFIG_DIR$` / `$USER_HOME$` / `$PROJECT_DIR$` 等 IDE 路径宏（导入期展开 + 项目内外路径归约）；历史遗留的未展开宏路径（如 `file://$APPLICATION_CONFIG_DIR$/consoles/xxx/console.sql`）在打开时按候选路径自动修复解析，收藏树、快速访问弹窗、助记符跳转三个入口共用同一套「宏展开候选 → 逐候选查 VFS → 每路径一次刷新兜底」解析器；打开失败从静默返回改为明确提示——日志 + 非模态 WARNING 通知（收藏名/原始路径/已尝试候选，超长与条数自动截断），数据库控制台收藏另有按控制台 id 在 IDE 配置目录 `consoles` 下兜底查找
 - **原生书签快捷键接管**：F11/Ctrl+F11/Shift+F11/Alt+2/Ctrl+0-9 与 Ctrl+点击行号区/图标区手势**始终**由本插件接管（与设置开关无关）；其中**键盘快捷键与 Ctrl+点击手势**固定为「当前项目」收藏、不弹作用域选择，而**菜单/工具栏/右键菜单等入口**弹「作用域+列表」选择（1.7.2 起）；「隐藏 PhpStorm 原生书签界面」开关只控制原生 Bookmarks 工具窗口与残余原生动作的显隐
 - **多入口支持**：**编辑器正文右键与行号区右键（1.8.0 起）不再挂「收藏」二级菜单**——这两处的原生 `F11`/`Ctrl+F11` 已被接管为一级菜单项「添加收藏」「添加助记收藏」，子菜单纯属重复；**项目视图右键、编辑器标签页右键、导航栏右键**仍保留「收藏」子菜单，子菜单首位为「收藏文件夹/收藏文件」直捷动作（文案按选中类型动态显示：收藏文件夹/收藏文件/收藏，行为与"添加收藏"的文件上下文一致：弹「作用域+分组」选择、记住上次、多选批量一次、已收藏切换移除）；「导入原生书签」已收编为顶层动作，不再出现在右键子菜单（入口：收藏工具窗口工具栏按钮与「查找操作 Ctrl+Shift+A」）
-- **菜单显示名按开关区分 + 助记符行图标（1.8.0）**：未开启「隐藏 PhpStorm 原生书签界面」时，插件所有菜单项/被接管原生动作项的显示名自动追加「（Favorites）」后缀（如「添加收藏（Favorites）」「收藏（Favorites） >」），与同屏出现的原生「书签」项区分；开启隐藏（默认）时保持短名。后缀按每次菜单打开实时计算，切换设置无需重启。助记符收藏在行号区改为「书签 + 字符」复合图标（0-9/A-Z 各自可见，按字符缓存、HiDPI 清晰），点击图标即跳转到收藏行（文件已打开只定位不重复开 tab，解析失败发提示通知），tooltip 补「点击图标跳转」并列出同一行的全部收藏（项目 → 共享 → 全局）
+- **菜单显示名按开关区分 + 助记符行图标（1.8.0 / 1.8.1 修复）**：未开启「隐藏 PhpStorm 原生书签界面」时，插件所有菜单项/被接管原生动作项的显示名自动追加「（Favorites）」后缀（如「添加收藏（Favorites）」「收藏（Favorites） >」），与同屏出现的原生「书签」项区分；开启隐藏（默认）时保持短名。后缀按每次菜单打开实时计算，切换设置无需重启。助记符收藏在行号区显示**平台原生助记符图标**（`BookmarkType.gutterIcon`，书签底图 + 数字/字母，0-9/A-Z 各自可见、跟随主题色与新 UI 尺寸），点击图标即跳转到收藏行（文件已打开只定位不重复开 tab，解析失败发提示通知），tooltip 补「点击图标跳转」并列出同一行的全部收藏（项目 → 共享 → 全局）；1.8.1 修复缩进行（以及任何行首缩进被合并进上一个空白 token 的行）不显示图标的问题
 - **旧数据迁移**：升级后旧 favorites.xml 中无列表信息的收藏自动归入默认列表，不丢数据
 
 ## 使用说明
@@ -334,6 +334,14 @@
 - 行号区点击跳转：`BookmarkGutterHelper.navigateToBookmark` 补全（原为空实现）——`invokeLater` 回 EDT → `BookmarkFileResolver.findExistingFile` 解析（路径宏候选 + VFS 兜底）→ `FileEditorManager.openFile`（已打开只激活不重复开 tab）→ 按文件精确取 `TextEditor` → caret 移到收藏行（0 基越界保护）→ `scrollToCaret(CENTER)` → `requestFocus`；解析失败走 `BookmarkOpenNotifier` 的「无法打开收藏」通知（与收藏树一致，不再静默）
 - tooltip 增强：首行「助记符收藏 [X]（点击图标跳转）+ 文件/行号」，同一行存在多条收藏（项目/共享/全局）时逐条列出并标记「← 图标」；图标仍优先助记符收藏（优先级 项目 → 共享 → 全局）
 - 快捷键核实：PhpStorm 2023.3 的原生 `GotoBookmark0-9` / `GotoBookmarkA-Z` **动作 id 全部存在**（`lib/app-client.jar!idea/LangActions.xml`），且 `keymaps/$default.xml` 只给数字系列绑了 `control 0`…`control 9`（字母系列无默认键位）——因此 `Ctrl+0-9` 在接管后照旧可用、本次无需新增键位，字母系列继续用插件自带 `Ctrl+Alt+A-Z`；「添加助记收藏」后经 `BookmarkRefreshHelper.refreshAfterChange` → `DaemonCodeAnalyzer.restart()` 立即重绘 gutter 图标
+
+### ✅ v1.8.1：行号区助记符图标修复（已完成）
+
+- 根因（用户反馈 1.8.0 装完后行号区仍无图标）：`BookmarkGutterHelper.getLineMarkerInfo` 的锚点判定要求「元素起点 == 行首」，并提前 `return null` 掉 `PsiWhiteSpace`。而 PSI 里「换行 + 缩进」是**一个**空白 token（PhpStorm 2023.3 词法器实测：`<?php\n    $a = 1;` → 空白 token `[5,10)="\n    "`，起点 5 是上一行的换行符，第 2 行行首是 6），缩进行的行首偏移上根本没有叶子——所有缩进行（用户截图 1203 行 `    \app\common\library\DingxiaomiService::deleteRemoteOrder(...)` 必然缩进）永远拿不到图标，截图里那个图标是 PhpStorm 原生书签自己画的
+- 修复：新增纯函数 `helper/BookmarkGutterAnchors`（`isLineAnchor(isLeaf, textLength, elementOffset, lineStartOffset)` = 行首叶子；`isIndentedLineAnchor(isLeaf, textLength, elementOffset, lineStartOffset, prevLeafOffset)` = 行首无叶子时取该行第一个叶子；`isAnchorOfItsLine` 组合两者），`BookmarkGutterHelper` 复用该判定，保证任意行恰好一个锚点（不重复、不遗漏）；同时按官方要求只处理叶子元素、跳过零长叶子，并删掉 `PsiWhiteSpace` 提前返回
+- 图标：`BookmarkIconHelper.getMnemonicIcon(mnemonic)` 改为直接返回平台原生助记符 gutter 图标 `BookmarkType.get(mnemonic.uppercaseChar()).gutterIcon`（非法字符自然落 `DEFAULT.gutterIcon` = 普通书签），删除 1.8.0 自绘的 `MnemonicBookmarkIcon`（白字 + 深色描边复合图标，外观与原生不一致、维护成本高）；匿名收藏仍用 `AllIcons.Gutter.Bookmark`
+- 诊断日志（INFO，可直接按关键词在 idea.log 搜索）：`Favorites 行收藏图标 provider 已激活（file=…）`（首次被平台调用时一条，用于证明 provider 确实在跑）；`Favorites 行收藏图标：file=…, line=…（0基）, 助记符=…`（每次成功生成图标一条，用于确认命中行与助记符）
+- 顺带加固：`BookmarkGutterHelper` 实现 `DumbAware`——平台 `LineMarkersPass.getMarkerProviders()` 会用 `DumbService.filterByDumbAwareness` 过滤掉非 DumbAware 的 provider，索引进行中（大项目刚打开/刚装完）图标不显示；本插件图标只依赖内存里的收藏数据，dumb 模式下查询安全
 
 ## 项目结构
 
