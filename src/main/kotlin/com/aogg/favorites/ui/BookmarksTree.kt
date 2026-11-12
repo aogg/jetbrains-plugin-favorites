@@ -23,6 +23,7 @@ import com.intellij.ide.DeleteProvider
 import com.intellij.ide.IdeView
 import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionPopupMenu
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -51,6 +52,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileEvent
 import com.intellij.openapi.vfs.VirtualFileListener
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.VirtualFileMoveEvent
 import com.intellij.openapi.vfs.newvfs.RefreshQueue
 import com.intellij.pom.Navigatable
 import com.intellij.psi.PsiDirectory
@@ -70,6 +72,8 @@ import javax.swing.Action
 import javax.swing.JComponent
 import javax.swing.KeyStroke
 import javax.swing.Timer
+import javax.swing.event.PopupMenuEvent
+import javax.swing.event.PopupMenuListener
 import javax.swing.event.TreeExpansionEvent
 import javax.swing.event.TreeWillExpandListener
 import javax.swing.tree.DefaultMutableTreeNode
@@ -432,6 +436,20 @@ class RemoteErrorHintNode(val tooltip: String) {
 }
 
 /**
+ * 目录结构自动刷新的受影响目录节点：VFS 结构变更命中（变更路径位于该目录之下含直接子级，或恰为该目录自身），
+ * 批量 [RefreshQueue] 刷新 VFS 后逐个原位重载子项时使用
+ *
+ * @param treeNode 目录节点对应的树节点（命中时的实例；整树重建后脱离模型时刷新自校验跳过）
+ * @param dir 目录节点用户对象
+ * @param dirFile 已解析的目录虚拟文件（批量刷新用）
+ */
+private data class DirStructureRefreshTarget(
+    val treeNode: DefaultMutableTreeNode,
+    val dir: DirNode,
+    val dirFile: VirtualFile
+)
+
+/**
  * 收藏树组件（1.3.0 PhpStorm 风格树状视图）：
  * 第一层=作用域（项目收藏/全局收藏，始终显示+总数徽标），第二层起=分组树（1.5.0 起
  * 列表升级为可多层级嵌套的分组：分组节点子节点 = 子分组节点（递归）+ 自身收藏的文件系统骨架树），
@@ -563,6 +581,12 @@ class BookmarksTree(
         /** 行内容随文件变动刷新的防抖毫秒数（连续保存/外部改动合并为一次刷新） */
         private const val LINE_REFRESH_DEBOUNCE_MS = 500
 
+        /** 目录结构随 VFS 结构事件刷新的防抖毫秒数（新建/删除/移动的连续事件合并为一次批量刷新） */
+        private const val DIR_STRUCTURE_REFRESH_DEBOUNCE_MS = 400
+
+        /** 目录右键菜单关闭后延迟刷新兜底的毫秒数（覆盖「新建目录」对话框异步落盘/native watcher 延迟盲区） */
+        private const val DIR_MENU_CLOSE_REFRESH_DELAY_MS = 1500
+
         /** 异步加载行内容的源文件大小上限（超过按读取失败处理回退收藏描述，避免后台加载超大文件） */
         private const val MAX_LINE_SOURCE_FILE_LENGTH = 20L * 1024 * 1024
 
@@ -665,6 +689,19 @@ class BookmarksTree(
         lineContentCache.clear()
     }
 
+    /** 待处理的 VFS 结构变更路径集合（仅 EDT 访问；防抖窗口内合并，到点批量刷新命中的已物化目录） */
+    private val pendingDirStructurePaths = LinkedHashSet<String>()
+
+    /** 目录结构防抖刷新定时器（一次性 Swing Timer 到点在 EDT 批量刷新，连续事件合并为一次） */
+    private var dirStructureRefreshTimer: Timer? = null
+
+    /** 目录结构自动刷新相关资源的注销句柄（注册到项目：项目关闭时停定时器并清空待处理集合/监听自动注销） */
+    private val dirStructureDisposable = Disposable {
+        dirStructureRefreshTimer?.stop()
+        dirStructureRefreshTimer = null
+        pendingDirStructurePaths.clear()
+    }
+
     init {
         isRootVisible = false
         showsRootHandles = true
@@ -759,6 +796,9 @@ class BookmarksTree(
 
         // 行内容实时更新：监听文件内容变更（保存/外部改动）防抖刷新，项目关闭时随 Disposer 注销
         registerLineContentListener()
+
+        // 目录结构实时刷新：监听 VFS 结构事件（新建/删除/移动）防抖批量刷新命中的已物化目录，项目关闭时随 Disposer 注销
+        registerDirStructureListener()
 
         refresh()
     }
@@ -1790,10 +1830,15 @@ class BookmarksTree(
      * 规则匹配子树提供独立菜单：规则根=新建/全刷、规则=刷新/编辑/启禁/删除、条目=跳转/查看详情；
      * 作用域根/列表分组节点（项目/全局）首项=添加目录…，弹平台目录选择器后写入收藏；
      * 右键文件/文件夹（收藏本体/懒加载真实子项）首项=添加收藏：平台同款动作，弹「作用域+分组」选择、
-     * 已收藏切换移除，项目/共享/全局三作用域通用）
+     * 已收藏切换移除，项目/共享/全局三作用域通用。
+     * 右键命中扩大到整行（[rowPathAt]）：节点文字右侧行内空白也能弹出并选中该行，列表下方整片空白不弹；
+     * 目录结构变更自动刷新：树挂 VFS 结构事件监听（[registerDirStructureListener]）为主路径，
+     * 右键目录时项目视图操作菜单关闭后延迟刷新兜底（[scheduleDirRefreshOnPopupMenuClosed]），
+     * 新建/删除/移动目录文件后无需手动「刷新此目录」
      */
     private fun showPopupMenu(e: MouseEvent) {
-        val path = getPathForLocation(e.x, e.y) ?: return
+        // 右键命中扩大到整行：文字右侧行内空白也能命中并选中该行；列表下方整片空白仍返回 null 不弹菜单
+        val path = rowPathAt(e.x, e.y) ?: return
         selectionPath = path
 
         // ////////////////  分支零：规则匹配子树独立右键菜单  start  /////////////////////
@@ -2021,9 +2066,43 @@ class BookmarksTree(
                 val actionContext = buildTargetDataContext(clickedTargetFile, baseContext)
                 popup.setDataContext(java.util.function.Supplier { actionContext })
             }.onFailure { log.warn("设置收藏树右键菜单 DataContext 失败（平台动作将回退默认上下文）", it) }
+
+            // ////////////////  兜底：目录右键菜单关闭后延迟刷新  start  //////////////////
+            // 右键目录（文件夹收藏/真实目录）时，项目视图操作菜单（如 新建▸目录）关闭后延迟刷新一次，
+            // 覆盖输入对话框异步落盘、native watcher 延迟等 VFS 事件盲区（主路径=结构事件监听）；
+            // 规则匹配子树/共享根与集合节点的独立菜单在上方分支提前 return，不受影响
+            if (clickedDirNode != null && clickedDirNode.fsBacked && clickedDirTreeNode != null) {
+                scheduleDirRefreshOnPopupMenuClosed(popup, clickedDirTreeNode, clickedDirNode)
+            }
+            // ////////////////  兜底：目录右键菜单关闭后延迟刷新  end  ////////////////////
         }
         popup.component.show(this, e.x, e.y)
         // ////////////////  弹窗  end  /////////////////////////////////////////////////
+    }
+
+    /**
+     * 右键命中行解析（整行命中）：点击落在节点文字渲染范围内时直接取该行；
+     * 文字右侧行内空白回退最近行，并用行边界校验点击 y 在该行垂直范围内（x 不限制=整行命中）；
+     * 列表下方整片空白/y 越界（行底边及以下）返回 null（调用方不弹菜单）
+     *
+     * @param x 点击 x 坐标（组件坐标系）
+     * @param y 点击 y 坐标（组件坐标系）
+     * @return 命中行的 TreePath；未命中返回 null
+     */
+    private fun rowPathAt(x: Int, y: Int): TreePath? {
+        // ////////////////  核心逻辑一：文字渲染范围内直接命中  start  ///////////////////
+        val row = getRowForLocation(x, y)
+        if (row >= 0) return getPathForRow(row)
+        // ////////////////  核心逻辑一  end  //////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：行内空白回退最近行并按行边界校验 y  start  /////////
+        val closestRow = getClosestRowForLocation(x, y)
+        if (closestRow < 0) return null
+        val bounds = getRowBounds(closestRow) ?: return null
+        // y 落在行底边及以下（列表下方整片空白）不命中
+        if (y < bounds.y || y >= bounds.y + bounds.height) return null
+        return getPathForRow(closestRow)
+        // ////////////////  核心逻辑二  end  //////////////////////////////////////////
     }
 
     /**
@@ -2726,6 +2805,149 @@ class BookmarksTree(
                 }
             }, lineContentDisposable)
         }.onFailure { log.warn("注册文件内容变更监听失败", it) }
+    }
+
+    /**
+     * 注册目录结构变更自动刷新监听（对齐 PhpStorm 原生收藏的 VFS 联动）：
+     * VirtualFileManager 的 fileCreated/fileDeleted/fileMoved（均为 after 类事件）覆盖 IDE 内与外部的
+     * 新建/删除/移动目录文件（contentsChanged/propertyChanged 与目录子项列表无关，不监听）；
+     * 事件路径记入防抖集合（~400ms 合并），到点批量刷新命中的已物化目录节点（不整树重建，保留展开态）；
+     * 监听挂 [dirStructureDisposable] 并注册到项目，项目关闭时自动注销
+     */
+    private fun registerDirStructureListener() {
+        runCatching { Disposer.register(project, dirStructureDisposable) }
+            .onFailure { log.warn("注册目录结构资源注销句柄失败", it) }
+        runCatching {
+            VirtualFileManager.getInstance().addVirtualFileListener(object : VirtualFileListener {
+                override fun fileCreated(event: VirtualFileEvent) {
+                    if (project.isDisposed) return
+                    // VFS 事件可能在非 EDT 线程触发（同步刷新等），统一转发 EDT 处理（防抖集合/树模型仅 EDT 访问）
+                    runOnEdt { scheduleDirStructureRefreshForPath(event.file.path) }
+                }
+
+                override fun fileDeleted(event: VirtualFileEvent) {
+                    if (project.isDisposed) return
+                    runOnEdt { scheduleDirStructureRefreshForPath(event.file.path) }
+                }
+
+                override fun fileMoved(event: VirtualFileMoveEvent) {
+                    if (project.isDisposed) return
+                    // 移动同时改变新旧两个父目录的子项列表，两个位置都要参与命中
+                    runOnEdt {
+                        scheduleDirStructureRefreshForPath(event.oldParent.path + "/" + event.file.name)
+                        scheduleDirStructureRefreshForPath(event.newParent.path + "/" + event.file.name)
+                    }
+                }
+            }, dirStructureDisposable)
+        }.onFailure { log.warn("注册目录结构变更监听失败", it) }
+        log.info(
+            "目录结构自动刷新：VFS 结构事件监听已注册" +
+                "（fileCreated/fileDeleted/fileMoved，防抖 ${DIR_STRUCTURE_REFRESH_DEBOUNCE_MS}ms 合并刷新已物化目录节点）"
+        )
+    }
+
+    /**
+     * 防抖调度目录结构刷新：变更路径记入待处理集合并重置定时器，
+     * ~400ms 无新事件后一次性批量刷新命中的已物化目录节点（连续新建/删除/移动合并为一次）
+     *
+     * @param path 变更文件/目录的绝对路径（VFS 路径）
+     */
+    private fun scheduleDirStructureRefreshForPath(path: String) {
+        pendingDirStructurePaths.add(path)
+        val timer = dirStructureRefreshTimer ?: Timer(DIR_STRUCTURE_REFRESH_DEBOUNCE_MS, null).also {
+            it.isRepeats = false
+            it.addActionListener {
+                // Swing Timer 到点在 EDT 执行；pendingDirStructurePaths 仅 EDT 访问
+                val paths = pendingDirStructurePaths.toList()
+                pendingDirStructurePaths.clear()
+                refreshDirNodesForStructureChanges(paths)
+            }
+            dirStructureRefreshTimer = it
+        }
+        timer.restart()
+    }
+
+    /**
+     * 批量刷新命中 VFS 结构变更的目录节点（EDT）：遍历当前树模型中已物化（childrenLoaded=true）且
+     * fsBacked=true 的目录节点，某条变更路径位于该目录之下（含直接子级）或恰为该目录自身时命中；
+     * 命中集合经一次 [RefreshQueue] 批量刷新 VFS，回调回 EDT 后逐个 [reloadDirChildren]（保留展开态，
+     * 不整树重建）；节点已脱离模型时 reloadDirChildren 自带校验跳过；无任何命中则不做任何事
+     *
+     * @param paths 变更文件/目录的绝对路径列表（VFS 路径，防抖窗口内合并）
+     */
+    private fun refreshDirNodesForStructureChanges(paths: List<String>) {
+        // ////////////////  校验参数：无变更或模型不可用直接跳过  start  ///////////////////
+        if (paths.isEmpty()) return
+        val treeModel = model as? DefaultTreeModel ?: return
+        val root = treeModel.root as? DefaultMutableTreeNode ?: return
+        // ////////////////  校验参数  end  ////////////////////////////////////////////
+
+        // ////////////////  核心逻辑一：收集命中变更路径的已物化目录节点  start  ///////////
+        val affected = mutableListOf<DirStructureRefreshTarget>()
+        walkTreeNodes(root) { node ->
+            val dir = node.userObject as? DirNode ?: return@walkTreeNodes
+            // 仅已懒加载且读真实文件系统的目录需要响应结构变更（纯虚拟目录不读盘，无子项可刷）
+            if (!dir.childrenLoaded || !dir.fsBacked) return@walkTreeNodes
+            val dirFile = resolveNodePath(dir.scope, dir.path) ?: return@walkTreeNodes
+            val dirPrefix = dirFile.path + "/"
+            val hit = paths.any { it == dirFile.path || it.startsWith(dirPrefix) }
+            if (hit) affected.add(DirStructureRefreshTarget(node, dir, dirFile))
+        }
+        if (affected.isEmpty()) return
+        // ////////////////  核心逻辑一  end  //////////////////////////////////////////
+
+        // ////////////////  核心逻辑二：批量刷新 VFS 后原位重载子项（保留展开态）  start  ///
+        log.info(
+            "目录结构自动刷新：命中已物化目录节点数=" + affected.size +
+                "，待处理变更路径数=" + paths.size + "，样例路径=" + paths.first()
+        )
+        runCatching {
+            RefreshQueue.getInstance().refresh(true, true, Runnable {
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    affected.forEach { reloadDirChildren(it.treeNode, it.dir) }
+                }
+            }, affected.map { it.dirFile })
+        }.onFailure { e ->
+            log.warn("目录结构批量刷新失败，退化为逐目录刷新", e)
+            affected.forEach { refreshDirFromDisk(it.treeNode, it.dir) }
+        }
+        // ////////////////  核心逻辑二  end  //////////////////////////////////////////
+    }
+
+    /**
+     * 目录右键菜单关闭后延迟刷新兜底（主路径=[registerDirStructureListener] 结构事件监听，此处覆盖盲区）：
+     * 「项目视图操作 ▸ 新建 ▸ 目录」等平台动作经输入对话框异步落盘、native watcher 上报有延迟，
+     * 可能晚于结构事件监听的防抖窗口；菜单关闭后延迟 ~1.5s 调用现有 [refreshDirFromDisk]
+     * （VFS 刷新+原位重载+缺失退化整树重建）；菜单挂着时不刷，避免弹窗悬空时重建树
+     *
+     * @param popup 已构建的右键弹窗（关闭时机经其 JPopupMenu 的 PopupMenuListener 感知）
+     * @param treeNode 右键目录对应的树节点
+     * @param dir 右键目录节点用户对象
+     */
+    private fun scheduleDirRefreshOnPopupMenuClosed(
+        popup: ActionPopupMenu,
+        treeNode: DefaultMutableTreeNode,
+        dir: DirNode
+    ) {
+        popup.component.addPopupMenuListener(object : PopupMenuListener {
+            override fun popupMenuWillBecomeVisible(e: PopupMenuEvent) {}
+            override fun popupMenuWillBecomeInvisible(e: PopupMenuEvent) {
+                // 菜单已关闭：一次性延迟刷新，给对话框异步落盘/native watcher 留出时间窗口
+                val timer = Timer(DIR_MENU_CLOSE_REFRESH_DELAY_MS, null)
+                timer.isRepeats = false
+                timer.addActionListener {
+                    if (project.isDisposed) return@addActionListener
+                    log.info(
+                        "目录结构自动刷新：右键目录菜单关闭后延迟刷新兜底执行" +
+                            "（目录名=${dir.name}，路径=${dir.path}）"
+                    )
+                    refreshDirFromDisk(treeNode, dir)
+                }
+                timer.start()
+            }
+            override fun popupMenuCanceled(e: PopupMenuEvent) {}
+        })
     }
 
     /**
