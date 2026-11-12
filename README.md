@@ -37,7 +37,7 @@
 
 - **项目收藏**：保存在 `.idea/favorites.xml`，随项目走，换台电脑/换个项目不跟随
 - **全局收藏**：保存在 IDE 配置目录 `favorites.global.xml`，跨项目共享（存绝对路径，可在任何项目中跳转）
-- **添加时选择**：添加收藏/助记收藏时弹出「作用域+分组」树选择（1.5.0 起，见「收藏分组」小节），默认高亮上次使用的作用域与分组并自动记住；项目视图多选批量只弹一次选择，全部加入同一作用域与分组；同一位置已有收藏时维持原有切换（直接移除）语义；**例外**：键盘快捷键（F11/Ctrl+F11）与 Ctrl+点击行号区手势固定加入「当前项目」收藏并直接进上次分组，不弹选择（1.7.2 起菜单/工具栏等非快捷键入口统一弹选择）
+- **添加时选择**：添加收藏/助记收藏时弹出「作用域+分组」树选择（1.5.0 起，见「收藏分组」小节），默认高亮上次使用的作用域与分组并自动记住；项目视图多选批量只弹一次选择，全部加入同一作用域与分组；同一位置已有收藏时维持原有切换（直接移除）语义；**例外**：键盘快捷键（F11/Ctrl+F11）与 Ctrl+点击行号区手势固定加入「当前项目」收藏并直接进上次分组，不弹选择（1.7.2 起菜单/工具栏等非快捷键入口统一弹选择）；**弹窗内右键可直接管理分组（1.8.1 起）**——右键作用域根节点或默认列表「收藏」新建顶级列表、右键分组节点新建子分组/重命名/级联删除（组内收藏并入默认列表），三作用域通用（共享只写自己集合），操作后弹窗不关闭并自动选中新分组，输入过滤与 Enter/Esc 行为不变
 - **跨作用域转移**：右键收藏 → "移动到列表" → 展开另一作用域的列表组选择目标列表；全局→项目时若收藏位于项目目录之外会提示失败；转移后助记符在目标作用域冲突时自动降级为匿名收藏
 
 ### 共享收藏（1.7.0 引入，1.7.1 改版为配置来源项目）
@@ -335,13 +335,15 @@
 - tooltip 增强：首行「助记符收藏 [X]（点击图标跳转）+ 文件/行号」，同一行存在多条收藏（项目/共享/全局）时逐条列出并标记「← 图标」；图标仍优先助记符收藏（优先级 项目 → 共享 → 全局）
 - 快捷键核实：PhpStorm 2023.3 的原生 `GotoBookmark0-9` / `GotoBookmarkA-Z` **动作 id 全部存在**（`lib/app-client.jar!idea/LangActions.xml`），且 `keymaps/$default.xml` 只给数字系列绑了 `control 0`…`control 9`（字母系列无默认键位）——因此 `Ctrl+0-9` 在接管后照旧可用、本次无需新增键位，字母系列继续用插件自带 `Ctrl+Alt+A-Z`；「添加助记收藏」后经 `BookmarkRefreshHelper.refreshAfterChange` → `DaemonCodeAnalyzer.restart()` 立即重绘 gutter 图标
 
-### ✅ v1.8.1：行号区助记符图标修复（已完成）
+### ✅ v1.8.1：行号区助记符图标修复 + 添加收藏弹窗右键管理分组（已完成）
 
 - 根因（用户反馈 1.8.0 装完后行号区仍无图标）：`BookmarkGutterHelper.getLineMarkerInfo` 的锚点判定要求「元素起点 == 行首」，并提前 `return null` 掉 `PsiWhiteSpace`。而 PSI 里「换行 + 缩进」是**一个**空白 token（PhpStorm 2023.3 词法器实测：`<?php\n    $a = 1;` → 空白 token `[5,10)="\n    "`，起点 5 是上一行的换行符，第 2 行行首是 6），缩进行的行首偏移上根本没有叶子——所有缩进行（用户截图 1203 行 `    \app\common\library\DingxiaomiService::deleteRemoteOrder(...)` 必然缩进）永远拿不到图标，截图里那个图标是 PhpStorm 原生书签自己画的
 - 修复：新增纯函数 `helper/BookmarkGutterAnchors`（`isLineAnchor(isLeaf, textLength, elementOffset, lineStartOffset)` = 行首叶子；`isIndentedLineAnchor(isLeaf, textLength, elementOffset, lineStartOffset, prevLeafOffset)` = 行首无叶子时取该行第一个叶子；`isAnchorOfItsLine` 组合两者），`BookmarkGutterHelper` 复用该判定，保证任意行恰好一个锚点（不重复、不遗漏）；同时按官方要求只处理叶子元素、跳过零长叶子，并删掉 `PsiWhiteSpace` 提前返回
 - 图标：`BookmarkIconHelper.getMnemonicIcon(mnemonic)` 改为直接返回平台原生助记符 gutter 图标 `BookmarkType.get(mnemonic.uppercaseChar()).gutterIcon`（非法字符自然落 `DEFAULT.gutterIcon` = 普通书签），删除 1.8.0 自绘的 `MnemonicBookmarkIcon`（白字 + 深色描边复合图标，外观与原生不一致、维护成本高）；匿名收藏仍用 `AllIcons.Gutter.Bookmark`
 - 诊断日志（INFO，可直接按关键词在 idea.log 搜索）：`Favorites 行收藏图标 provider 已激活（file=…）`（首次被平台调用时一条，用于证明 provider 确实在跑）；`Favorites 行收藏图标：file=…, line=…（0基）, 助记符=…`（每次成功生成图标一条，用于确认命中行与助记符）
 - 顺带加固：`BookmarkGutterHelper` 实现 `DumbAware`——平台 `LineMarkersPass.getMarkerProviders()` 会用 `DumbService.filterByDumbAwareness` 过滤掉非 DumbAware 的 provider，索引进行中（大项目刚打开/刚装完）图标不显示；本插件图标只依赖内存里的收藏数据，dumb 模式下查询安全
+- 全语言注册核实（2023.3 平台源码）：`codeInsight.lineMarkerProvider` 是 `LanguageExtensionPoint` 扩展点，`Language.ANY = new Language("")`（ID 即空串），`LineMarkersPass.getMarkerProviders()` → `LineMarkerProviders.allForLanguageOrAny(language)` 对任何真实语言都会拼上「ANY（空 key）」注册的 provider——因此 plugin.xml 现有 `language=""` 就是「所有语言（含 PHP）」的正确写法，无需修改；据此在 `PluginXmlStructureTest` 固化「language 必须为空串」回归守卫，并新增 `BookmarkGutterAnchorsTest` 纯函数单测（行首叶子/缩进行/零长叶子/唯一性等边界）
+- 弹窗右键管理分组（新功能）：`ScopeGroupChooserPopup` 重构为 `ScopeGroupChooserController` 持有弹窗与树——右键先选中被点节点（标准树行为），再按节点类型弹上下文菜单（`JBPopupFactory.createActionGroupPopup` 在光标处显示）：右键【作用域根节点】或【默认列表「收藏」】→「新建列表」（该作用域新建顶级列表）；右键【分组节点】→「新建子分组」（该分组下）、「重命名列表」、「删除列表」（级联删除全部后代子分组，确认框说明组内收藏并入默认列表「收藏」不丢数据）；菜单项与文案完全对齐收藏工具窗口 `BookmarksTree` 的分组 CRUD（输入框 `Messages.showInputDialog` + `InputValidator` 名称唯一性校验一致，共享作用域只写自己集合）。操作完成后弹窗不关闭：原地重建弹窗树（组件与监听器复用，按「作用域/分组名」稳定 key 尽量保留展开状态），自动选中新建/重命名后的分组并滚动到位，直接 Enter 即可确认；删除分组会同步刷新背后的收藏工具窗口（收藏并入默认列表走 `BookmarkRefreshHelper` 全量刷新，新建/重命名只刷工具窗口树）；右键操作不改变「记住上次选择」（`lastGroupPerScope` 仍只在确认选择时更新）
 
 ## 项目结构
 
