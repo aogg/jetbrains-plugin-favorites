@@ -10,11 +10,11 @@ import com.aogg.favorites.ui.ScopedBookmark
 import com.intellij.ide.projectView.impl.AbstractProjectViewPane
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.actionSystem.Navigatable
 import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
-import com.intellij.openapi.editor.OpenFileDescriptor
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.pom.Navigatable
 import com.intellij.psi.PsiElement
 import com.intellij.psi.util.PsiUtilCore
 import java.io.File
