@@ -14,7 +14,10 @@ import com.intellij.openapi.vfs.VirtualFile
  *   默认记住上次选择、多选批量只弹一次、已收藏则切换移除），行为与其文件上下文完全一致；
  * - 菜单文案按选中类型动态显示：全部是文件夹→「收藏文件夹」；全部是文件（单/多选）→「收藏文件」；
  *   文件夹+文件混合多选→「收藏」；
- * - 1.8.0：文案再按「隐藏原生书签界面」开关决定是否追加「（Favorites）」后缀（见 [FavoritesActionTexts]）。
+ * - 1.8.0：文案再按「隐藏原生书签界面」开关决定是否追加「（Favorites）」后缀（见 [FavoritesActionTexts]）；
+ * - 1.8.2：选中文件集合改用 [AddActionSupport.selectedFilesForUpdate] 多键回退解析——
+ *   BGT 后台 update + 菜单快照上下文里项目视图的 VIRTUAL_FILE_ARRAY 可能推导为空导致整组隐藏，
+ *   判定不再单点依赖该键（详见该方法的根因说明）。
  */
 class AddFileFolderFavoriteAction : AnAction("收藏", DESCRIPTION, null) {
 
@@ -39,7 +42,7 @@ class AddFileFolderFavoriteAction : AnAction("收藏", DESCRIPTION, null) {
     override fun update(e: AnActionEvent) {
         // ////////////////  可见性：有项目 + 非编辑器上下文 + 文件集合非空  start  ///////////
         val files = if (e.project != null && e.getData(CommonDataKeys.EDITOR) == null) {
-            selectedFiles(e)
+            AddActionSupport.selectedFilesForUpdate(e)
         } else {
             VirtualFile.EMPTY_ARRAY
         }
@@ -56,14 +59,11 @@ class AddFileFolderFavoriteAction : AnAction("收藏", DESCRIPTION, null) {
     }
 
     /**
-     * 选中文件集合：多选数组优先，为空时回退单个（标签页/导航栏等上下文可能只给单个）
+     * 选中文件集合：复用 [AddActionSupport.selectedFilesForUpdate] 多键回退解析
+     * （多选数组优先，回退单个/Navigatable/PSI/项目视图选区快照，见其根因说明）
      */
-    private fun selectedFiles(e: AnActionEvent): Array<VirtualFile> {
-        val array = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)
-        if (!array.isNullOrEmpty()) return array
-        val single = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return VirtualFile.EMPTY_ARRAY
-        return arrayOf(single)
-    }
+    private fun selectedFiles(e: AnActionEvent): Array<VirtualFile> =
+        AddActionSupport.selectedFilesForUpdate(e)
 
     /**
      * 菜单文案：全部文件夹→「收藏文件夹」；全部文件（单/多选）→「收藏文件」；混合多选→「收藏」

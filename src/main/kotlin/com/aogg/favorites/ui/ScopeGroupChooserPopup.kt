@@ -17,8 +17,10 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.InputValidator
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.messages.MessageDialog
 import com.intellij.openapi.ui.popup.JBPopup
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.ui.ColoredTreeCellRenderer
@@ -33,6 +35,7 @@ import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.AbstractAction
+import javax.swing.Icon
 import javax.swing.JTree
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
@@ -67,6 +70,15 @@ import javax.swing.tree.TreeSelectionModel
  * - 右键先选中被点节点（标准树行为）；操作完成后弹窗不关闭，重建弹窗树（尽量保留展开状态），
  *   并自动选中新建/重命名后的分组，方便用户直接 Enter 确认；
  * - 右键操作不改变「记住上次选择」（lastGroupPerScope 只在确认选择时更新）。
+ *
+ * 1.8.2 修复「输入框一出现选择弹窗就被关闭」：
+ * - 根因：右键分组管理弹的模态对话框（输入框/确认框/错误提示）窗口激活，导致背后的选择弹窗
+ *   因「窗口失活」被平台 cancel 直接关闭，后续 afterGroupStructureChanged 在已关闭弹窗上重建树无效，
+ *   用户看到「添加收藏的弹窗关闭了」，收藏流程丢失；
+ * - 修复：本弹窗内所有项目模态对话框统一走 [ScopeGroupChooserController.showModalDialogKeepingChooser]
+ *   ——置 DialogWrapper.KEEP_POPUPS_OPEN，平台在对话框打开期间令弹窗 canClose=false（不因失活/
+ *   点击外部取消），对话框关闭后选择弹窗原样存活，树上重建并选中新分组，Enter 即可确认；
+ *   取消输入框/重名校验阻断路径弹窗同样不丢，三作用域共用同一输入流程行为一致。
  */
 object ScopeGroupChooserPopup {
 
@@ -636,7 +648,7 @@ object ScopeGroupChooserPopup {
             if (created) {
                 afterGroupStructureChanged(scope, selectGroup = name, cascadeDataChanged = false)
             } else {
-                Messages.showErrorDialog(project, "新建列表失败：名称不能为空且不能与现有分组重名", "新建列表")
+                showMessageDialogKeepingChooser("新建列表失败：名称不能为空且不能与现有分组重名", "新建列表", Messages.getErrorIcon())
             }
             // ////////////////  核心逻辑二  end  ////////////////////////////////////////
         }
@@ -671,7 +683,7 @@ object ScopeGroupChooserPopup {
             if (created) {
                 afterGroupStructureChanged(scope, selectGroup = name, cascadeDataChanged = false)
             } else {
-                Messages.showErrorDialog(project, "新建子分组失败：名称不能为空且不能与现有分组重名", "新建子分组")
+                showMessageDialogKeepingChooser("新建子分组失败：名称不能为空且不能与现有分组重名", "新建子分组", Messages.getErrorIcon())
             }
             // ////////////////  核心逻辑二  end  ////////////////////////////////////////
         }
@@ -706,7 +718,7 @@ object ScopeGroupChooserPopup {
             if (renamed) {
                 afterGroupStructureChanged(scope, selectGroup = newName, cascadeDataChanged = false)
             } else {
-                Messages.showErrorDialog(project, "重命名列表失败：名称不能为空且不能与现有列表重名", "重命名列表")
+                showMessageDialogKeepingChooser("重命名列表失败：名称不能为空且不能与现有列表重名", "重命名列表", Messages.getErrorIcon())
             }
             // ////////////////  核心逻辑二  end  ////////////////////////////////////////
         }
@@ -726,7 +738,7 @@ object ScopeGroupChooserPopup {
 
             // ////////////////  校验参数：分组不存在时明确提示（数据可能已被别处删除）  start  //
             if (preview == null) {
-                Messages.showInfoMessage(project, "列表「$listName」不存在", "删除列表")
+                showMessageDialogKeepingChooser("列表「$listName」不存在", "删除列表", Messages.getInformationIcon())
                 return
             }
             // ////////////////  校验参数  end  ///////////////////////////////////////////
@@ -740,7 +752,18 @@ object ScopeGroupChooserPopup {
                 "确定要删除「${scope.label}」中的列表「$listName」吗？\n" +
                     "其中的 ${preview.movedBookmarkCount} 条收藏将并入默认列表「${Bookmark.DEFAULT_LIST_NAME}」。"
             }
-            if (Messages.showYesNoDialog(project, message, "删除列表", Messages.getQuestionIcon()) != Messages.YES) return
+            // 1.8.2：确认框也走 KEEP_POPUPS_OPEN，避免确认框窗口激活把背后的选择弹窗挤掉
+            val confirmDialog = MessageDialog(
+                project,
+                message,
+                "删除列表",
+                arrayOf(Messages.getYesButton(), Messages.getNoButton()),
+                0,
+                Messages.getQuestionIcon(),
+                true
+            )
+            showModalDialogKeepingChooser(confirmDialog)
+            if (confirmDialog.exitCode != Messages.YES) return
             // ////////////////  核心逻辑一  end  ////////////////////////////////////////
 
             // ////////////////  核心逻辑二：级联删除并原地重建树  start  ///////////////////
@@ -759,8 +782,38 @@ object ScopeGroupChooserPopup {
         }
 
         /**
+         * 弹出「保留选择弹窗」的项目模态对话框（1.8.2 修复输入框挤掉选择弹窗）：
+         * 置 [DialogWrapper.KEEP_POPUPS_OPEN] 后，平台在本对话框打开期间令背后的选择弹窗
+         * canClose=false（不因窗口失活/点击外部而 cancel），对话框关闭后选择弹窗原样存活，
+         * 树上重建并选中目标分组后用户按 Enter 即可确认收藏；取消/阻断路径弹窗同样不丢。
+         *
+         * @param dialog 已配置好的项目模态对话框（InputDialog/MessageDialog）
+         */
+        private fun showModalDialogKeepingChooser(dialog: DialogWrapper) {
+            dialog.setKeepPopupsOpen(true)
+            dialog.show()
+        }
+
+        /**
+         * 项目级信息/错误提示框（单 OK 按钮，同 [showModalDialogKeepingChooser] 保留选择弹窗）
+         *
+         * @param message 提示文案
+         * @param title 对话框标题
+         * @param icon 图标（错误用 Messages.getErrorIcon，信息用 Messages.getInformationIcon）
+         * @return 用户点击的选项索引（单按钮恒为 0）
+         */
+        private fun showMessageDialogKeepingChooser(message: String, title: String, icon: Icon): Int {
+            val dialog = MessageDialog(project, message, title, arrayOf(Messages.getOkButton()), 0, icon, true)
+            showModalDialogKeepingChooser(dialog)
+            return dialog.exitCode
+        }
+
+        /**
          * 输入分组名称（重名/空白校验与收藏工具窗口一致：validator 阻断无效输入，
          * 写入失败再弹明确错误）。重命名场景允许与原名相同（[allowSameAs]）。
+         *
+         * 1.8.2：不再用 Messages.showInputDialog 直接弹——输入框必须 KEEP_POPUPS_OPEN，
+         * 否则输入框窗口激活会 cancel 掉背后的选择弹窗（右键新建/重命名后弹窗直接丢失）。
          *
          * @param title 对话框标题
          * @param message 提示文案
@@ -775,8 +828,9 @@ object ScopeGroupChooserPopup {
             initialValue: String,
             manager: ScopedBookmarkManager,
             allowSameAs: String?
-        ): String? =
-            Messages.showInputDialog(
+        ): String? {
+            // ////////////////  准备数据：构造 KEEP_POPUPS_OPEN 的输入对话框  start  /////////
+            val dialog = Messages.InputDialog(
                 project,
                 message,
                 title,
@@ -789,7 +843,17 @@ object ScopeGroupChooserPopup {
 
                     override fun canClose(inputString: String): Boolean = checkInput(inputString)
                 }
-            )?.trim()
+            )
+            // ////////////////  准备数据  end  ///////////////////////////////////////////
+
+            // ////////////////  核心逻辑：模态输入，期间保留背后的选择弹窗  start  ///////////
+            showModalDialogKeepingChooser(dialog)
+            // ////////////////  核心逻辑  end  ///////////////////////////////////////////
+
+            // ////////////////  返回：确定返回裁剪后的名称，取消返回 null  start  ////////////
+            return if (dialog.exitCode == Messages.OK) dialog.inputString?.trim() else null
+            // ////////////////  返回  end  ///////////////////////////////////////////////
+        }
 
         /**
          * 分组结构变化后的统一收尾：

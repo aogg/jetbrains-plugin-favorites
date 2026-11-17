@@ -25,6 +25,14 @@ import com.intellij.openapi.vfs.VirtualFile
  *   仍挂 项目视图 / 编辑器标签页 / 导航栏 右键（要收藏文件/文件夹走这三处）；
  * - 组标题文案按「隐藏原生书签界面」开关动态加「（Favorites）」后缀（见 [FavoritesActionTexts]），
  *   与同屏出现的原生「书签」组区分；菜单每次打开都会 update，切换设置后无需重启。
+ *
+ * 1.8.2 项目视图右键整组消失修复：
+ * - 根因：2022.3+ 平台对未声明更新线程的动作默认在后台线程（BGT）跑 update()，右键菜单数据上下文
+ *   是弹窗打开瞬间的快照；项目视图上下文的 VIRTUAL_FILE_ARRAY 依赖平台规则/选区快照推导，
+ *   部分版本推导为空 → 本组与三个子项的可见性判定全部误判「无选中」→ 整组隐藏（注册仍在）；
+ * - 修复：选中文件集合改用 [AddActionSupport.selectedFilesForUpdate] 多键回退解析
+ *   （VIRTUAL_FILE_ARRAY/VIRTUAL_FILE/NAVIGATABLE/PSI/SELECTED_ITEMS/BGT_DATA_PROVIDER），
+ *   判定不再单点依赖 VIRTUAL_FILE_ARRAY 的推导可达性。
  */
 class FavoritesActionGroup : DefaultActionGroup() {
 
@@ -40,9 +48,9 @@ class FavoritesActionGroup : DefaultActionGroup() {
         }
         // ////////////////  校验参数  end  /////////////////////////////////////////////
 
-        // ////////////////  准备数据：编辑器上下文 与 选中文件集合（数组优先，回退单个）  start
+        // ////////////////  准备数据：编辑器上下文 与 选中文件集合（多键回退解析）  start  /
         val editor = e.getData(CommonDataKeys.EDITOR)
-        val files = if (editor == null) selectedFiles(e) else VirtualFile.EMPTY_ARRAY
+        val files = if (editor == null) AddActionSupport.selectedFilesForUpdate(e) else VirtualFile.EMPTY_ARRAY
         // ////////////////  准备数据  end  /////////////////////////////////////////////
 
         // ////////////////  核心逻辑：编辑器上下文或文件集合非空才显示，其余上下文整组隐藏  start
@@ -52,21 +60,6 @@ class FavoritesActionGroup : DefaultActionGroup() {
         // ////////////////  文案动态：组标题按「隐藏原生书签界面」开关加插件名后缀（1.8.0）  start
         e.presentation.text = FavoritesActionTexts.of(BASE_TEXT)
         // ////////////////  文案动态  end  /////////////////////////////////////////////
-    }
-
-    /**
-     * 选中文件集合：多选数组优先，为空时回退单个（标签页/导航栏等上下文可能只提供单个文件）
-     *
-     * @param e 动作事件
-     * @return 选中的虚拟文件数组（无选中返回空数组）
-     */
-    private fun selectedFiles(e: AnActionEvent): Array<VirtualFile> {
-        // ////////////////  核心逻辑：多选数组优先，空则回退单个文件  start  ///////////////
-        val array = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)
-        if (!array.isNullOrEmpty()) return array
-        val single = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return VirtualFile.EMPTY_ARRAY
-        return arrayOf(single)
-        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
     }
 
     companion object {

@@ -7,9 +7,16 @@ import com.aogg.favorites.model.FavoritesScopeResolver
 import com.aogg.favorites.model.GlobalBookmarkManager
 import com.aogg.favorites.model.BookmarkManager
 import com.aogg.favorites.ui.ScopedBookmark
+import com.intellij.ide.projectView.impl.AbstractProjectViewPane
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.actionSystem.Navigatable
+import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
+import com.intellij.openapi.editor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiElement
+import com.intellij.psi.util.PsiUtilCore
 import java.io.File
 
 /**
@@ -185,6 +192,81 @@ object AddActionSupport {
             bookmark.filePath == path &&
             bookmark.lineNumber == location.lineNumber &&
             extra(bookmark)
+    }
+
+    /**
+     * 菜单 update() 可见性判定的「选中文件集合」解析（1.8.2 项目视图右键收藏缺失修复）
+     *
+     * 根因背景：2022.3+ 平台对未声明更新线程的动作默认在后台线程（BGT）执行 update()，
+     * 右键菜单的数据上下文是弹窗打开瞬间的快照（PreCachedDataContext）。项目视图上下文里
+     * VIRTUAL_FILE_ARRAY 并非直供键：要靠平台 CONTEXT 规则（VirtualFileArrayRule）从
+     * SELECTED_ITEMS / PSI_ELEMENT_ARRAY / VIRTUAL_FILE 推导，或走 BGT_DATA_PROVIDER 的
+     * 项目视图选区快照兜底；不同平台版本（233~262）对这些推导键的可达性不一致，
+     * 推导为空时可见性判定误判「无选中」→ 整组隐藏 → 项目视图右键看不到「收藏」组
+     * （编辑器标签页直供 VIRTUAL_FILE 不受影响，故该位置一直正常）。
+     *
+     * 按「直供键优先、推导键兜底」解析，全部为只读快速取值（PsiUtilCore.getVirtualFile
+     * 不触发索引，BGT/EDT 均安全）：VIRTUAL_FILE_ARRAY → VIRTUAL_FILE →
+     * NAVIGATABLE_ARRAY/NAVIGATABLE → PSI_ELEMENT_ARRAY → PSI_FILE/PSI_ELEMENT →
+     * SELECTED_ITEMS（项目视图原始选区节点）→ BGT_DATA_PROVIDER 回查。
+     *
+     * @param e 动作事件
+     * @return 选中的虚拟文件数组（解析不到返回空数组）
+     */
+    fun selectedFilesForUpdate(e: AnActionEvent): Array<VirtualFile> {
+        // ////////////////  核心逻辑：多选数组/单文件直供键优先  start  ///////////////////
+        val array = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)
+        if (!array.isNullOrEmpty()) return array
+        e.getData(CommonDataKeys.VIRTUAL_FILE)?.let { return arrayOf(it) }
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：Navigatable 选区 → VirtualFile  start  /////////////
+        val navigatables = e.getData(CommonDataKeys.NAVIGATABLE_ARRAY)
+            ?: e.getData(CommonDataKeys.NAVIGATABLE)?.let { arrayOf<Navigatable>(it) }
+            ?: Navigatable.EMPTY_NAVIGATABLE_ARRAY
+        val fromNavigatable = navigatables.mapNotNull { virtualFileOfNavigatable(it) }
+        if (fromNavigatable.isNotEmpty()) return fromNavigatable.toTypedArray()
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：PSI 选区 → VirtualFile  start  ////////////////////
+        val psiElements = e.getData(PlatformCoreDataKeys.PSI_ELEMENT_ARRAY)
+            ?: e.getData(CommonDataKeys.PSI_FILE)?.let { arrayOf<PsiElement>(it) }
+            ?: e.getData(CommonDataKeys.PSI_ELEMENT)?.let { arrayOf<PsiElement>(it) }
+            ?: PsiElement.EMPTY_ARRAY
+        val fromPsi = psiElements.mapNotNull { PsiUtilCore.getVirtualFile(it) }
+        if (fromPsi.isNotEmpty()) return fromPsi.toTypedArray()
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：项目视图原始选区节点（SELECTED_ITEMS）兜底  start  //
+        val selectedItems = e.getData(PlatformCoreDataKeys.SELECTED_ITEMS)
+        if (selectedItems != null && selectedItems.isNotEmpty()) {
+            val fromNodes = selectedItems.mapNotNull { item ->
+                when (val value = AbstractProjectViewPane.extractValueFromNode(item)) {
+                    is VirtualFile -> value
+                    is PsiElement -> PsiUtilCore.getVirtualFile(value)
+                    else -> null
+                }
+            }
+            if (fromNodes.isNotEmpty()) return fromNodes.toTypedArray()
+        }
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+
+        // ////////////////  核心逻辑：BGT_DATA_PROVIDER 回查（平台后台更新官方兜底）  start
+        val bgtProvider = e.getData(PlatformCoreDataKeys.BGT_DATA_PROVIDER)
+            ?: return VirtualFile.EMPTY_ARRAY
+        val viaBgt = bgtProvider.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY.name)
+        return (viaBgt as? Array<VirtualFile>) ?: VirtualFile.EMPTY_ARRAY
+        // ////////////////  核心逻辑  end  /////////////////////////////////////////////
+    }
+
+    /**
+     * Navigatable 尽力转 VirtualFile：PsiElement 直接取虚拟文件；OpenFileDescriptor 取其文件；
+     * 其余类型（如自定义 Navigatable）解析不了返回 null
+     */
+    private fun virtualFileOfNavigatable(navigatable: Navigatable): VirtualFile? = when (navigatable) {
+        is PsiElement -> PsiUtilCore.getVirtualFile(navigatable)
+        is OpenFileDescriptor -> navigatable.file
+        else -> null
     }
 
     /**

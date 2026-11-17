@@ -268,12 +268,16 @@ class AddMnemonicBookmarkAction : AnAction("添加助记收藏", "添加助记�
      *
      * 1.8.0：菜单文案按「隐藏原生书签界面」开关实时计算（隐藏=开 用短名，关闭时加「（Favorites）」后缀），
      * 菜单每次打开都会走 update，所以切换设置后无需重启即生效。
+     *
+     * 1.8.2：可见性判定改用 [AddActionSupport.selectedFilesForUpdate] 多键回退解析——
+     * BGT 后台 update + 菜单快照上下文里项目视图的 VIRTUAL_FILE_ARRAY 可能推导为空导致本项整项隐藏，
+     * 判定不再单点依赖该键（详见该方法的根因说明）。
      */
     override fun update(e: AnActionEvent) {
         val project = e.project
         val hasContext = project != null &&
             (e.getData(CommonDataKeys.EDITOR) != null ||
-                !e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY).isNullOrEmpty())
+                AddActionSupport.selectedFilesForUpdate(e).isNotEmpty())
         e.presentation.isEnabledAndVisible = hasContext
         // 1.8.0 菜单文案：短名 / 短名+插件名后缀（按设置实时切换）
         e.presentation.text = FavoritesActionTexts.of(BASE_TEXT)
